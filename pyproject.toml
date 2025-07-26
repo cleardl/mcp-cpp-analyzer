@@ -1,0 +1,20 @@
+[project]
+name = "mcp-cpp-analyzer"
+version = "0.1.0"
+description = "MCP C++ Code Intelligence Server with clangd backend"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastmcp>=2.10.5",
+    "uvicorn>=0.24.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "httpx>=0.25.0",
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[project.scripts]
+mcp-cpp-analyzer = "mcp_cpp_analyzer.server:main"
