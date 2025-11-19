@@ -18,6 +18,7 @@ class Config:
     host: str = "127.0.0.1"
     port: int = 8000
     log_level: str = "info"
+    transport: str = "sse"
 
     def __post_init__(self):
         
@@ -60,6 +61,13 @@ def get_global_config() -> Config:
 def set_config_from_cli() -> None: 
     """Create config from command line arguments and set as global config"""
     parser = argparse.ArgumentParser(description="MCP-CPP-Analyzer, A C++ Intelligence Server")
+    parser.add_argument(
+        '--transport',
+        type=str,
+        choices=['stdio', 'sse'],
+        default='sse',
+        help='Transport protocol to use (default: http)'
+    )
     parser.add_argument("--compile-db-path", type=Path, required=True, help="Directory containing compile_commands.json")
     parser.add_argument("--clangd-path", default="clangd", help="Path to clangd executable")
     parser.add_argument("--log-level", default="info", choices=["debug", "info", "warning", "error"])
@@ -84,6 +92,7 @@ def set_config_from_cli() -> None:
         lsp_references_timeout=args.references_timeout,
         host=args.host,
         port=args.port,
-        log_level=args.log_level
+        log_level=args.log_level,
+        transport=args.transport
     )
     set_global_config(config)
