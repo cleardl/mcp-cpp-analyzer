@@ -87,25 +87,26 @@ mcp-cpp-analyzer --compile-db-path /home/user/my-cpp-project --host 0.0.0.0 --po
 服务器启动后，MCP客户端可以通过以下方式连接：
 
 - **SSE 连接**: `http://127.0.0.1:8000/sse` (默认)
-- **自定义地址**: `http://your-host:your-port/sse`
+- **stdio**
 
 #### Cursor配置
 
-![image-20250726141904356](https://documents-images.oss-cn-wuhan-lr.aliyuncs.com/image-20250726141904356.png)
-
-添加配置：
+当前项目下创建`./cursor/mcp.json`添加配置：
 
 ```
-    "mcp-cpp-analyzer": {
-      "url": "http://localhost:8000/sse"
+{
+  "mcpServers": {
+    "cpp-analyzer": {
+      "command": "mcp-cpp-analyzer",
+      "args": [
+        "--transport", "stdio",
+        "--compile-db-path", <compile_commands.json所在目录>
+      ]
     }
+  }
+}
+
 ```
-
-![image-20250726142232501](https://documents-images.oss-cn-wuhan-lr.aliyuncs.com/image-20250726142232501.png)
-
-绿灯亮起表示可用
-
-![image-20250726143302341](https://documents-images.oss-cn-wuhan-lr.aliyuncs.com/image-20250726143302341.png)
 
 
 

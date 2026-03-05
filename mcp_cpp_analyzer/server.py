@@ -64,9 +64,11 @@ async def app_lifespan(app):
         lsp_client = None
         logger.info("Backend cleanup completed")
 
-mcp = FastMCP("MCP-CPP-Analyzer-Server",instructions="A C++ code intelligence server powered by clangd." \
-                                                        " Use this tool instead of search when you need to find symbol definitions, declarations, or references in C++ codebases. " \
-                                                        "Requires absolute file paths and 1-based line/column numbers.")
+mcp = FastMCP("MCP-CPP-Analyzer-Server",
+             lifespan=app_lifespan,
+             instructions="A C++ code intelligence server powered by clangd." \
+                          " Use this tool instead of search when you need to find symbol definitions, declarations, or references in C++ codebases. " \
+                          "Requires absolute file paths and 1-based line/column numbers.")
 
 def get_lsp_methods():
     return lsp_methods
@@ -289,15 +291,20 @@ def main():
         set_config_from_cli()
         config = get_global_config()
         
+        log_handlers = [logging.StreamHandler(sys.stderr)]
         logging.basicConfig(
             level=getattr(logging, config.log_level.upper()),
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            handlers=log_handlers
         )
-        logger.info("Starting MCP-CPP-Analyzer Server")
+        logger.info(f"Starting MCP-CPP-Analyzer Server (transport={config.transport})")
 
-        app = mcp.http_app(transport="sse")
-        app.router.lifespan_context = app_lifespan
-        uvicorn.run(app, host=config.host, port=config.port)
+        if config.transport == "stdio":
+            mcp.run(transport="stdio")
+        else:
+            app = mcp.http_app(transport="sse")
+            app.router.lifespan_context = app_lifespan
+            uvicorn.run(app, host=config.host, port=config.port)
         
     except KeyboardInterrupt:
         logger.info("Server stopped by user")
