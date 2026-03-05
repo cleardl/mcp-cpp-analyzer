@@ -291,12 +291,12 @@ def main():
     try:
         config = get_global_config()
         
-        log_handlers = [logging.StreamHandler(sys.stderr)]
-        logging.basicConfig(
-            level=getattr(logging, config.log_level.upper()),
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            handlers=log_handlers
-        )
+        root_logger = logging.getLogger()
+        root_logger.handlers.clear()
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+        root_logger.addHandler(handler)
+        root_logger.setLevel(getattr(logging, config.log_level.upper()))
         logger.info(f"Starting MCP-CPP-Analyzer Server (transport={config.transport})")
 
         if config.transport == "stdio":
