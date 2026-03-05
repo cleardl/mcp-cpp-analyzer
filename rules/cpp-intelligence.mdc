@@ -1,7 +1,6 @@
 ---
 description: C++ intelligence strategy - prefer MCP cpp-analyzer over brute-force search
-globs: "**/*.{cpp,h,hpp,cc,cxx,hxx}"
-alwaysApply: false
+alwaysApply: true
 ---
 
 # C++ Intelligence: Prefer MCP cpp-analyzer
