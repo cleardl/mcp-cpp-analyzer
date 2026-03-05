@@ -16,11 +16,17 @@ MCP-CPP-Analyzer 是一个专为C++开发设计的Model Context Protocol (MCP) �
 
 ## 安装
 
-先git clone到本地
+### 环境要求
+
+- **Python >= 3.12**
+
+先git clone到本地，然后安装：
 
 ```bash
 pip install -e .
 ```
+
+> 请确保执行 `pip install` 时使用的 Python 版本 >= 3.12。可通过 `python --version` 确认。
 
 ## 使用方法
 
