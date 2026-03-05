@@ -16,5 +16,8 @@ test = [
     "pytest-asyncio>=0.21.0",
 ]
 
+[tool.setuptools.packages.find]
+include = ["mcp_cpp_analyzer*"]
+
 [project.scripts]
-mcp-cpp-analyzer = "mcp_cpp_analyzer.server:main"
+mcp-cpp-analyzer = "mcp_cpp_analyzer.cli:main"

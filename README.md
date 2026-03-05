@@ -46,75 +46,83 @@ pip install -e .
 
 ### 启动服务
 
-安装完成后，可以使用以下命令启动最简单形式服务器：
-
 ```bash
-mcp-cpp-analyzer <compile_commands.json所在目录>
+mcp-cpp-analyzer serve --compile-db-path <compile_commands.json所在目录>
 ```
 
 #### 命令参数
 
 ```bash
-mcp-cpp-analyzer --compile-db-path <directory> [options]
+mcp-cpp-analyzer serve --compile-db-path <directory> [options]
 
 选项:
-  --compile-db-path DIR C++ compile-commands.json所在路径 (必需)
-  --clangd-path PATH    clangd 可执行文件路径
-  --log-level LEVEL     日志级别 [debug|info|warning|error] (默认: info)
+  --transport {stdio,sse}  传输协议 (默认: sse)
+  --compile-db-path DIR    compile_commands.json 所在目录 (必需)
+  --clangd-path PATH       clangd 可执行文件路径
+  --log-level LEVEL        日志级别 [debug|info|warning|error] (默认: info)
   --init-timeout SECONDS   LSP 初始化超时时间
-  --hover-timeout SECONDS   悬停信息超时时间
+  --hover-timeout SECONDS  悬停信息超时时间
   --definition-timeout SECONDS   定义查找超时时间
   --references-timeout SECONDS   引用查找超时时间
-  --host HOST           服务器绑定地址 (默认: 127.0.0.1)
-  --port PORT           服务器端口 (默认: 8000)
+  --host HOST              服务器绑定地址 (默认: 127.0.0.1)
+  --port PORT              服务器端口 (默认: 8000)
 ```
 
 #### 启动示例
 
 ```bash
-# 启动基本服务
-mcp-cpp-analyzer /home/user/my-cpp-project
+# 以 SSE 模式启动（默认）
+mcp-cpp-analyzer serve --compile-db-path /home/user/my-cpp-project
+
+# 以 stdio 模式启动（用于 Cursor/Claude Desktop 等 MCP 客户端）
+mcp-cpp-analyzer serve --transport stdio --compile-db-path /home/user/my-cpp-project
 
 # 指定 clangd 路径
-mcp-cpp-analyzer /home/user/my-cpp-project --clangd-path /usr/local/bin/clangd
+mcp-cpp-analyzer serve --compile-db-path /home/user/my-cpp-project --clangd-path /usr/local/bin/clangd
 
 # 启用调试日志
-mcp-cpp-analyzer --compile-db-path /home/user/my-cpp-project --log-level debug
-
-# 自定义超时设置
-mcp-cpp-analyzer --compile-db-path /home/user/my-cpp-project --hover-timeout 15 --definition-timeout 25
-
-# 自定义服务器地址和端口
-mcp-cpp-analyzer --compile-db-path /home/user/my-cpp-project --host 0.0.0.0 --port 9000
+mcp-cpp-analyzer serve --compile-db-path /home/user/my-cpp-project --log-level debug
 ```
 
-### MCP客户端连接
+### 安装 Cursor Rule
 
-服务器启动后，MCP客户端可以通过以下方式连接：
+将内置的 Cursor 规则文件安装到目标 C++ 项目中，引导 AI 优先使用 MCP 工具进行精确的符号分析：
 
-- **SSE 连接**: `http://127.0.0.1:8000/sse` (默认)
-- **stdio**
+```bash
+# 安装到指定项目目录
+mcp-cpp-analyzer install-rule /path/to/your/cpp-project
 
-#### Cursor配置
-
-当前项目下创建`./cursor/mcp.json`添加配置：
-
+# 安装到当前目录
+mcp-cpp-analyzer install-rule
 ```
+
+规则文件会被复制到 `<目标目录>/.cursor/rules/` 下，已存在的同名文件不会被覆盖。
+
+### MCP 客户端连接
+
+服务器启动后，MCP 客户端可以通过以下方式连接：
+
+- **SSE 连接**: `http://127.0.0.1:8000/sse`（默认）
+- **stdio**: 由客户端直接启动进程
+
+#### Cursor 配置
+
+在 C++ 项目下创建 `.cursor/mcp.json`：
+
+```json
 {
   "mcpServers": {
     "cpp-analyzer": {
       "command": "mcp-cpp-analyzer",
       "args": [
+        "serve",
         "--transport", "stdio",
-        "--compile-db-path", <compile_commands.json所在目录>
+        "--compile-db-path", "<compile_commands.json所在目录>"
       ]
     }
   }
 }
-
 ```
-
-
 
 ## 当前已支持的能力
 

@@ -287,8 +287,8 @@ async def diagnose_clangd(ctx: Context) -> Dict[str, Any]:
     return result
 
 def main():
+    """Start the MCP server. Expects global config to be already set."""
     try:
-        set_config_from_cli()
         config = get_global_config()
         
         log_handlers = [logging.StreamHandler(sys.stderr)]
