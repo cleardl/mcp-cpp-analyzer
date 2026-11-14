@@ -1,121 +1,62 @@
+"""Own one clangd process; protocol shutdown is handled by ClangdClient."""
 import asyncio
 import logging
-from typing import Optional, Dict, Any
+import os
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 class ClangdServer:
-    def __init__(self, clangd_path: str, compile_db_path: Path):
-        logger.info("Clangd init")
+    def __init__(self, clangd_path: str, compile_db_path: Path, *, background_index=True):
         self.clangd_path = clangd_path
-        self.compile_db_path = compile_db_path
-        self.process: Optional[asyncio.subprocess.Process] = None
-        self._stderr_task: Optional[asyncio.Task] = None
-
-    async def start(self) -> None:
-        if self.process:
-            logger.warning("Clangd process already started")
-            return
-        
-        self._verify_compile_database()
-        
-        args = [
-            self.clangd_path,
-            "--header-insertion=never",
-            "--clang-tidy=false",
-            "--completion-style=detailed",
-            "--log=error",
-            "--background-index",
-            f"--compile-commands-dir={self.compile_db_path.parent}"
-        ]
-
-        try:
-            self.process = await asyncio.create_subprocess_exec(
-                *args,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            logger.info(f"Clangd process started with PID: {self.process.pid}")
-            
-            self._stderr_task = asyncio.create_task(self._monitor_stderr())
-            
-        except Exception as e:
-            logger.error(f"Failed to start clangd: {e}")
-            raise
-
-    async def stop(self) -> None:
-        if not self.process:
-            return
-            
-        logger.info("Stopping clangd process...")
-        
-        if self._stderr_task:
-            self._stderr_task.cancel()
-            try:
-                await self._stderr_task
-            except asyncio.CancelledError:
-                pass
-            self._stderr_task = None
-            
-        try:
-            self.process.terminate()
-            
-            try:
-                await asyncio.wait_for(self.process.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
-                logger.warning("Clangd didn't stop gracefully, force killing...")
-                self.process.kill()
-                await self.process.wait()
-                
-            logger.info("Clangd process stopped")
-            
-        except Exception as e:
-            logger.error(f"Error stopping clangd: {e}")
-        finally:
-            self.process = None
-            
-    async def _monitor_stderr(self) -> None:
-        if not self.process or not self.process.stderr:
-            return
-            
-        try:
-            while self.process.returncode is None:
-                line = await self.process.stderr.readline()
-                if not line:
-                    break
-                    
-                stderr_text = line.decode('utf-8', errors='replace').strip()
-                if stderr_text:
-                    logger.warning(f"[CLANGD STDERR] {stderr_text}")
-                    
-        except Exception as e:
-            logger.error(f"Error monitoring clangd stderr: {e}")
-
-    def _verify_compile_database(self) -> None:
-        compile_db_path = self.compile_db_path
-        
-        if not compile_db_path.exists():
-            raise FileNotFoundError(f"Compile database not found: {compile_db_path}")
-        
-        logger.info(f"Found compile database: {compile_db_path}")
+        self.compile_db_path = Path(compile_db_path)
+        self.background_index = background_index
+        self.process = None
+        self._stderr_task = None
+        self.stderr_tail = []
 
     @property
-    def is_alive(self) -> bool:
-        if self.process is None:
-            return False
-            
-        if self.process.returncode is not None:
-            logger.debug(f" Clangd process died with return code: {self.process.returncode}")
-            return False
-            
-        if (self.process.stdin is None or self.process.stdin.is_closing()):
-            logger.debug(f" Clangd process stdin is closed")
-            return False
-            
-        if (self.process.stdout is None or self.process.stderr is None):
-            logger.debug(f" Clangd process stdout/stderr is None")
-            return False
-            
-        return True
+    def is_alive(self):
+        return self.process is not None and self.process.returncode is None
+
+    async def start(self):
+        if self.process is not None:
+            raise RuntimeError("clangd process has already been created")
+        if not self.compile_db_path.is_file():
+            raise FileNotFoundError(self.compile_db_path)
+        args = [
+            self.clangd_path,
+            f"--compile-commands-dir={self.compile_db_path.parent}",
+            "--background-index" if self.background_index else "--background-index=false",
+            "--header-insertion=never", "--clang-tidy=false", "--log=error",
+        ]
+        self.process = await asyncio.create_subprocess_exec(
+            *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            creationflags=0x08000000 if os.name == "nt" else 0,
+        )
+        self._stderr_task = asyncio.create_task(self._read_stderr())
+
+    async def _read_stderr(self):
+        while line := await self.process.stderr.readline():
+            message = line.decode("utf-8", errors="replace").rstrip()
+            self.stderr_tail = (self.stderr_tail + [message])[-20:]
+            logger.warning("clangd: %s", message)
+
+    async def stop(self):
+        process = self.process
+        if process is None:
+            return
+        if process.returncode is None:
+            try:
+                await asyncio.wait_for(process.wait(), 2)
+            except asyncio.TimeoutError:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), 3)
+                except asyncio.TimeoutError:
+                    process.kill()
+                    await process.wait()
+        if self._stderr_task:
+            await self._stderr_task
+        self.process = None

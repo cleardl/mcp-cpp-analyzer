@@ -1,330 +1,200 @@
+"""Async LSP connection with cancellation, failure propagation and notifications."""
 import asyncio
 import json
 import logging
-from dataclasses import dataclass
-from typing import Dict, Any, Optional
 from pathlib import Path
-import time
-from .clangd_server import ClangdServer
 
 logger = logging.getLogger(__name__)
-@dataclass
-class PendingRequest:
-    id:str
-    method:str
-    future:asyncio.Future
-    start_time:float
 
-    @property
-    def elapsed_ms(self)->float:
-        return (time.time()-self.start_time)
-
-class ClangdClient:
-    def __init__(self, clangd_server: ClangdServer):
-        self.clangd_server = clangd_server
-        self.request_counter = 0
-        self.pending_requests: Dict[str, PendingRequest] = {}
-        self.initialized = False
-        self._reader_task: Optional[asyncio.Task] = None
-
-    async def start(self) -> None:
-        logger.info("Starting LSP client...")
-
-        await self.clangd_server.start()
-        
-        await asyncio.sleep(0.1)
-        
-        await self._verify_connection()
-        
-        self._reader_task = asyncio.create_task(self._read_messages())
-        
-        await self._initialize()
-        
-    async def _initialize(self) -> None:
-        
-        logger.debug("Initializing LSP connection...")
-        
-        from .config import get_global_config
-        config = get_global_config()
-        root_uri = path_to_uri(config.compile_db_dir)
-        logger.debug(f" Root URI: {root_uri}")
-        
-        init_params = {
-            "processId": None,
-            "clientInfo": {
-                "name": "mini-clangaroo",
-                "version": "0.1.0"
-            },
-            "rootUri": root_uri,
-            "capabilities": {
-                "textDocument": {
-                    "definition": {"dynamicRegistration": False},
-                    "references": {"dynamicRegistration": False},
-                    "hover": {"dynamicRegistration": False},
-                    "synchronization": {
-                        "dynamicRegistration": False,
-                        "willSave": False,
-                        "willSaveWaitUntil": False,
-                        "didSave": False
-                    }
-                },
-                "workspace": {
-                    "symbol": {"dynamicRegistration": False},
-                    "workspaceEdit": {"documentChanges": False}
-                }
-            }
-        }
-        
-        await self.request("initialize", init_params, timeout=config.lsp_init_timeout)
-        await self.notify("initialized", {})
-        self.initialized = True
-        
-    async def _verify_connection(self) -> None:
-        if not self.clangd_server.is_alive:
-            raise RuntimeError("Clangd process is not alive")
-        
-        stdin = self.clangd_server.process.stdin
-        
-        if hasattr(stdin, '_transport'):
-            transport = stdin._transport
-            
-            if transport is None:
-                raise RuntimeError("Transport is None")
-            
-            if hasattr(transport, '_closing') and transport._closing:
-                raise RuntimeError("Transport is closing")
-            
-            if hasattr(transport, '_loop'):
-                loop = transport._loop
-                if loop is None:
-                    raise RuntimeError("Transport loop is None")
-                if loop.is_closed():
-                    raise RuntimeError("Transport loop is closed")
-    
-    async def _send_message(self, message: Dict[str, Any]) -> None:
-        try:
-            await self._verify_connection()
-        except Exception as e:
-            logger.error(f"Connection verification failed: {e}")
-            raise RuntimeError(f"Connection verification failed: {e}")
-        
-        content = json.dumps(message, separators=(',', ':'))
-        header = f"Content-Length: {len(content)}\r\n\r\n"
-        data = (header + content).encode('utf-8')
-        
-        try:
-            stdin = self.clangd_server.process.stdin
-            stdin.write(data)
-            await stdin.drain()
-            logger.debug(f"Successfully sent message to clangd ({len(data)} bytes)")
-        except (BrokenPipeError, ConnectionResetError, OSError) as e:
-            logger.error(f"Pipe/connection error: {e}")
-            raise RuntimeError(f"Failed to send message to clangd (pipe broken): {e}")
-        except AttributeError as e:
-            logger.error(f"AttributeError (likely proactor issue): {e}")
-            raise RuntimeError(f"Failed to send message to clangd (transport error): {e}")
-        except Exception as e:
-            logger.error(f"Unexpected error in _send_message: {type(e).__name__}: {e}")
-            raise RuntimeError(f"Failed to send message to clangd (unexpected error): {e}")
-    async def notify(self, method: str, params: Dict[str, Any]) -> None:
-        message = {
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params
-        }
-        
-        await self._send_message(message)
-
-    async def request(self,method:str,params:Dict[str,Any],timeout:float=10.0)->Any:
-        request_id = str(self.request_counter)
-        self.request_counter += 1
-        message = {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "method": method,
-            "params": params
-        }
-        future = asyncio.Future()
-        pending = PendingRequest(
-            id=request_id,
-            method=method,
-            future=future,
-            start_time=time.time()
-        )
-        self.pending_requests[request_id] = pending
-        
-        try:
-            await self._send_message(message)
-            result = await asyncio.wait_for(future, timeout)
-            return result
-        except asyncio.TimeoutError:
-            if request_id in self.pending_requests:
-                del self.pending_requests[request_id]
-            logger.warning(f"LSP request timeout: {method} after {timeout}s")
-            raise
-        except Exception as e:
-            if request_id in self.pending_requests:
-                del self.pending_requests[request_id]
-            raise
-
-    async def _read_messages(self) -> None:
-        logger.debug(" About to read from clangd stdout")
-        buffer = b""
-        try:
-            while True:
-                if not self.clangd_server.is_alive:
-                    logger.error(" Clangd process died during message reading")
-                    break
-                    
-                try:
-                    data = await asyncio.wait_for(
-                        self.clangd_server.process.stdout.read(4096),
-                        timeout=1.0
-                    )
-                    if not data:
-                        logger.warning("No data received from clangd stdout")
-                        break
-                except asyncio.TimeoutError:
-                    continue
-                    
-                buffer += data
-                
-                # Parse messages
-                while b"\r\n\r\n" in buffer:
-                    try:
-                        # Find header end
-                        header_end = buffer.find(b"\r\n\r\n")
-                        header = buffer[:header_end].decode('utf-8')
-                        
-                        # Parse Content-Length
-                        content_length = 0
-                        for line in header.split('\r\n'):
-                            if line.startswith('Content-Length:'):
-                                content_length = int(line.split(':', 1)[1].strip())
-                                break
-                                
-                        if content_length == 0:
-                            logger.error(f"Invalid header: {header}")
-                            buffer = buffer[header_end + 4:]
-                            continue
-                            
-                        # Check if we have the full message
-                        message_start = header_end + 4
-                        message_end = message_start + content_length
-                        
-                        if len(buffer) >= message_end:
-                            content = buffer[message_start:message_end].decode('utf-8')
-                            buffer = buffer[message_end:]
-                            
-                            # Parse and handle message
-                            try:
-                                message = json.loads(content)
-                                await self._handle_message(message)
-                            except json.JSONDecodeError as e:
-                                logger.error(f"Invalid JSON from clangd: {e}")
-                        else:
-                            break
-                            
-                    except Exception as e:
-                        logger.error(f"Error parsing message: {e}")
-                        buffer = buffer[header_end + 4:]
-                        
-        except asyncio.CancelledError:
-            logger.debug("Message reading task cancelled")
-        except Exception as e:
-            logger.error(f"Error in message reading: {e}")
-    
-    async def _handle_message(self, message: Dict[str, Any]) -> None:
-        """Handle incoming LSP message"""
-        
-        try:
-            if "id" in message and "method" not in message:
-                # Response to our request
-                await self._handle_response(message)
-            elif "method" in message:
-                # Notification from clangd server,ignore most of them
-                method = message.get("method")
-                if method == "window/logMessage":
-                    # Log messages from clangd
-                    params = message.get("params", {})
-                    level = params.get("type", 1)
-                    message_text = params.get("message", "")
-                    if level == 1:
-                        logger.error(f"clangd: {message_text}")
-                    elif level == 2:
-                        logger.warning(f"clangd: {message_text}")
-                    else:
-                        logger.debug(f"clangd: {message_text}")
-                        
-        except Exception as e:
-            logger.error(f"Error handling message: {e}")
-    async def _handle_response(self, message: Dict[str, Any]) -> None:
-        request_id = str(message["id"])
-        
-        if request_id not in self.pending_requests:
-            logger.warning(f"Received response for unknown request: {request_id}")
-            return
-            
-        pending = self.pending_requests[request_id]
-        del self.pending_requests[request_id]
-        
-        elapsed_ms = pending.elapsed_ms
-        logger.debug(f"LSP {pending.method} completed in {elapsed_ms:.2f}ms")
-        
-        if "error" in message:
-            error = message["error"]
-            error_msg = f"LSP error in {pending.method}: {error.get('message', 'Unknown error')}"
-            pending.future.set_exception(RuntimeError(error_msg))
-        else:
-            pending.future.set_result(message.get("result"))
-    async def stop(self) -> None:
-        logger.info("Stopping LSP client...")
-        
-        if self.initialized:
-            try:
-                await self.request("shutdown", {})
-                await self.notify("exit", {})
-            except Exception as e:
-                logger.warning(f"Error during LSP shutdown: {e}")
-                
-        if self._reader_task:
-            self._reader_task.cancel()
-            try:
-                await self._reader_task
-            except asyncio.CancelledError:
-                pass
-                
-        await self.clangd_server.stop()
-        
-        logger.info("LSP client stopped")
+class LspError(RuntimeError):
+    def __init__(self, code, message):
+        self.code = code
+        super().__init__(message)
 
 def path_to_uri(path: Path) -> str:
-    """Convert file path to LSP URI"""
-    resolved_path = path.resolve()
-    
-    path_str = str(resolved_path)
-    
-    # 将反斜杠转换为正斜杠（URI标准）
-    path_str = path_str.replace('\\', '/')
-    
-    # 对于Windows驱动器路径，确保格式正确
-    # C:/path/to/file -> file:///C:/path/to/file
-    if len(path_str) >= 2 and path_str[1] == ':':
-        # Windows驱动器路径
-        return f"file:///{path_str}"
-    else:
-        # Unix-like路径
-        return f"file://{path_str}"
+    return Path(path).resolve().as_uri()
 
+class ClangdClient:
+    def __init__(self, clangd_server, workspace_root, *, request_timeout=30, init_timeout=60):
+        self.clangd_server = clangd_server
+        self.workspace_root = Path(workspace_root)
+        self.request_timeout = request_timeout
+        self.init_timeout = init_timeout
+        self.pending_requests = {}
+        self.request_counter = 0
+        self.initialized = False
+        self.capabilities = {}
+        self.server_info = {}
+        self.position_encoding = "utf-16"
+        self.failure = None
+        self.diagnostics = {}
+        self.diagnostic_events = {}
+        self.progress = {}
+        self._writer_lock = asyncio.Lock()
+        self._reader_task = None
+        self._process_task = None
+        self._closing = False
 
-def uri_to_path(uri: str) -> Path:
-    """Convert LSP URI to file path"""
-    if uri.startswith("file:///"):
-        # Windows风格: file:///C:/path/to/file
-        path_str = uri[8:]  # 移除 "file:///"
-        return Path(path_str)
-    elif uri.startswith("file://"):
-        # Unix风格: file://path/to/file
-        path_str = uri[7:]  # 移除 "file://"
-        return Path(path_str)
-    return Path(uri) 
+    async def start(self):
+        await self.clangd_server.start()
+        self._reader_task = asyncio.create_task(self._read_messages())
+        self._process_task = asyncio.create_task(self._watch_process())
+        try:
+            result = await self.request("initialize", {
+                "processId": None, "rootUri": path_to_uri(self.workspace_root),
+                "clientInfo": {"name": "mcp-cpp-analyzer", "version": "0.2.0"},
+                "capabilities": {
+                    "general": {"positionEncodings": ["utf-8", "utf-16"]},
+                    "workspace": {"configuration": True, "workspaceFolders": True},
+                    "window": {"workDoneProgress": True},
+                    "textDocument": {
+                        "definition": {"linkSupport": True},
+                        "declaration": {"linkSupport": True},
+                        "implementation": {"linkSupport": True},
+                        "typeDefinition": {"linkSupport": True},
+                        "documentSymbol": {"hierarchicalDocumentSymbolSupport": True},
+                        "publishDiagnostics": {"versionSupport": True, "relatedInformation": True},
+                    },
+                },
+                "workspaceFolders": [{"uri": path_to_uri(self.workspace_root),
+                                      "name": self.workspace_root.name}],
+            }, timeout=self.init_timeout)
+            self.capabilities = result["capabilities"]
+            self.server_info = result.get("serverInfo", {})
+            self.position_encoding = self.capabilities.get("positionEncoding", "utf-16")
+            if self.position_encoding not in ("utf-8", "utf-16", "utf-32"):
+                raise LspError("POSITION_ENCODING", f"Unsupported position encoding: {self.position_encoding}")
+            await self.notify("initialized", {})
+            self.initialized = True
+        except BaseException:
+            await self.stop()
+            raise
+
+    def _fail(self, error):
+        if self.failure is None:
+            self.failure = error
+        self.initialized = False
+        for future in tuple(self.pending_requests.values()):
+            if not future.done():
+                future.set_exception(error)
+
+    async def _watch_process(self):
+        code = await self.clangd_server.process.wait()
+        if not self._closing:
+            self._fail(LspError("BACKEND_EXITED", f"clangd exited with code {code}"))
+
+    async def _send_message(self, message):
+        if not self.clangd_server.is_alive:
+            raise LspError("BACKEND_UNAVAILABLE", "clangd process is not running")
+        if self.failure is not None:
+            raise self.failure
+        body = json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        async with self._writer_lock:
+            stream = self.clangd_server.process.stdin
+            stream.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body)
+            await stream.drain()
+
+    async def notify(self, method, params):
+        await self._send_message({"jsonrpc": "2.0", "method": method, "params": params})
+
+    async def request(self, method, params, timeout=None):
+        self.request_counter += 1
+        request_id = self.request_counter
+        future = asyncio.get_running_loop().create_future()
+        self.pending_requests[request_id] = future
+        try:
+            await self._send_message({"jsonrpc": "2.0", "id": request_id,
+                                      "method": method, "params": params})
+            return await asyncio.wait_for(future, timeout or self.request_timeout)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            if self.clangd_server.is_alive and self.failure is None:
+                try:
+                    await asyncio.wait_for(self.notify("$/cancelRequest", {"id": request_id}), 1)
+                except (OSError, LspError, asyncio.TimeoutError) as error:
+                    logger.warning("LSP cancellation delivery failed: %s", error)
+            raise
+        finally:
+            self.pending_requests.pop(request_id, None)
+            if not future.done():
+                future.cancel()
+
+    async def _read_messages(self):
+        stream = self.clangd_server.process.stdout
+        try:
+            while True:
+                headers = {}
+                while True:
+                    line = await stream.readline()
+                    if not line:
+                        raise LspError("BACKEND_EOF", "clangd closed its output stream")
+                    if line == b"\r\n":
+                        break
+                    key, value = line.decode("ascii").split(":", 1)
+                    headers[key.lower()] = value.strip()
+                length = int(headers.get("content-length", "0"))
+                if not 0 < length <= 32 * 1024 * 1024:
+                    raise LspError("INVALID_FRAME", f"Invalid LSP Content-Length: {length}")
+                message = json.loads(await stream.readexactly(length))
+                await self._handle_message(message)
+        except asyncio.CancelledError:
+            raise
+        except (OSError, ValueError, UnicodeError, asyncio.IncompleteReadError, LspError) as error:
+            if not self._closing:
+                self._fail(error)
+
+    async def _handle_message(self, message):
+        if "method" not in message:
+            future = self.pending_requests.get(message.get("id"))
+            if future is not None and not future.done():
+                if "error" in message:
+                    error = message["error"]
+                    future.set_exception(LspError(error["code"], error["message"]))
+                else:
+                    future.set_result(message.get("result"))
+            return
+        method = message["method"]
+        params = message.get("params", {})
+        if "id" in message:
+            response = {"jsonrpc": "2.0", "id": message["id"]}
+            if method == "workspace/configuration":
+                response["result"] = [None for _ in params.get("items", [])]
+            elif method == "workspace/workspaceFolders":
+                response["result"] = [{"uri": path_to_uri(self.workspace_root), "name": self.workspace_root.name}]
+            elif method in ("window/workDoneProgress/create", "client/registerCapability",
+                            "client/unregisterCapability"):
+                response["result"] = None
+            else:
+                response["error"] = {"code": -32601, "message": f"Unsupported client method: {method}"}
+            await self._send_message(response)
+        elif method == "textDocument/publishDiagnostics":
+            self.diagnostics[params["uri"]] = params
+            self.diagnostic_events.setdefault(params["uri"], asyncio.Event()).set()
+        elif method == "$/progress":
+            token = str(params["token"])
+            if params["value"].get("kind") == "end":
+                self.progress.pop(token, None)
+            else:
+                self.progress[token] = params["value"]
+        elif method == "window/logMessage":
+            logger.log(logging.WARNING if params.get("type", 1) <= 2 else logging.DEBUG,
+                       "clangd: %s", params.get("message", ""))
+
+    async def stop(self):
+        if self._closing:
+            return
+        self._closing = True
+        try:
+            if self.initialized and self.clangd_server.is_alive and self.failure is None:
+                try:
+                    await self.request("shutdown", None, timeout=3)
+                    await self.notify("exit", None)
+                except (LspError, OSError, asyncio.TimeoutError) as error:
+                    logger.warning("LSP shutdown failed: %s", error)
+            await self.clangd_server.stop()
+        finally:
+            self._fail(LspError("BACKEND_STOPPED", "clangd connection has been stopped"))
+            tasks = [task for task in (self._reader_task, self._process_task) if task is not None]
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self.pending_requests.clear()

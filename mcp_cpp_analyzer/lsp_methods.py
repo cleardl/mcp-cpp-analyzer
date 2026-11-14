@@ -1,269 +1,187 @@
+"""Document snapshots and typed semantic requests; no global session state."""
 import asyncio
-import logging
-import traceback
+from collections import OrderedDict
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from functools import cached_property
+import hashlib
 from pathlib import Path
-from typing import List, Optional, Dict, Any
 
-from .clangd_client import ClangdClient, path_to_uri, uri_to_path
-from .utils import get_file_language_id
-from .config import get_global_config
+from .clangd_client import LspError, path_to_uri
 
-logger = logging.getLogger(__name__)
+@dataclass
+class Snapshot:
+    path: Path
+    text: str
+    digest: str
+    version: int = 1
 
+    @property
+    def uri(self):
+        return path_to_uri(self.path)
+
+    @cached_property
+    def lines(self):
+        return self.text.splitlines()
+
+    def position(self, line, column, encoding):
+        lines = self.lines
+        if line < 1 or line > len(lines) or column < 1 or column > len(lines[line - 1]) + 1:
+            raise ValueError(f"Position is outside the document: {self.path}:{line}:{column}")
+        prefix = lines[line - 1][:column - 1]
+        units = len(prefix.encode("utf-8")) if encoding == "utf-8" else (
+            len(prefix.encode("utf-16-le")) // 2 if encoding == "utf-16" else len(prefix))
+        return {"line": line - 1, "character": units}
+
+    def column(self, line, units, encoding):
+        lines = self.lines
+        if line >= len(lines):
+            if line == len(lines) and units == 0:
+                return 1
+            raise ValueError(f"LSP returned a position outside {self.path}: {line}:{units}")
+        text = lines[line]
+        if encoding == "utf-32":
+            return units + 1
+        codec, width = ("utf-8", 1) if encoding == "utf-8" else ("utf-16-le", 2)
+        return len(text.encode(codec)[:units * width].decode(codec)) + 1
 
 class DocumentManager:
-    """Manages document state with clangd"""
-    
-    def __init__(self, lsp_client: ClangdClient):
+    def __init__(self, lsp_client, *, max_open_documents=32):
         self.lsp_client = lsp_client
-        self.open_documents: Dict[Path, dict] = {}
-        
-    async def ensure_document_open(self, file_path: Path) -> bool:
-        """Ensure document is open in clangd"""
-        
-        file_path = file_path.resolve()
-        logger.debug(f"Using file path: {file_path}")
-        
-        if file_path in self.open_documents:
-            logger.debug(f"Document already open: {file_path}")
-            return False
-            
-        try:
-            logger.debug(f"Reading file content: {file_path}")
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-        except UnicodeDecodeError:
-            logger.debug(f"UTF-8 decode failed, trying latin-1: {file_path}")
-            with open(file_path, 'r', encoding='latin-1') as f:
-                content = f.read()
-        except Exception as e:
-            logger.error(f"Failed to read file {file_path}: {e}")
-            raise
-                
-        language_id = get_file_language_id(file_path)
+        self.max_open_documents = max_open_documents
+        self.open_documents = OrderedDict()
+        self._locks = {}
+        self._active = set()
+        self._sync_lock = asyncio.Lock()
 
-        uri = path_to_uri(file_path)
-        logger.debug(f"Generated URI: {uri}")
-        logger.debug(f"Language ID: {language_id}")
-        
-        try:
-            await self.lsp_client.notify("textDocument/didOpen", {
-                "textDocument": {
-                    "uri": uri,
-                    "languageId": language_id,
-                    "version": 1,
-                    "text": content
-                }
-            })
-            logger.debug(f"didOpen notification sent successfully for {file_path}")
-        except Exception as e:
-            logger.error(f"Failed to send didOpen notification: {type(e).__name__}: {e}")
-            raise
-        
-        self.open_documents[file_path] = {
-            "uri": path_to_uri(file_path),
-            "language_id": language_id,
-            "version": 1
-        }
-        return True
-    
-    async def close_all_documents(self):
-        for file_path, doc_info in self.open_documents.items():
+    async def snapshot(self, path):
+        path = Path(path).resolve()
+        def read():
+            before = path.stat()
+            if not path.is_file() or before.st_size > 16 * 1024 * 1024:
+                raise ValueError(f"Expected a source file no larger than 16 MiB: {path}")
+            raw = path.read_bytes()
+            after = path.stat()
+            if (before.st_mtime_ns, before.st_size) != (after.st_mtime_ns, after.st_size):
+                raise LspError("DOCUMENT_CHANGED", f"File changed while reading: {path}")
+            return Snapshot(path, raw.decode("utf-8"), hashlib.sha256(raw).hexdigest())
+        return await asyncio.to_thread(read)
+
+    @asynccontextmanager
+    async def document(self, path):
+        path = Path(path).resolve()
+        lock = self._locks.setdefault(path, asyncio.Lock())
+        async with lock:
+            self._active.add(path)
             try:
-                await self.lsp_client.notify("textDocument/didClose", {
-                    "textDocument": {
-                        "uri": doc_info["uri"]
-                    }
-                })
-            except Exception as e:
-                logger.warning(f"Error closing document {file_path}: {e}")
-                
-        self.open_documents.clear()
-        logger.debug("Closed all documents")
+                async with self._sync_lock:
+                    current = await self.snapshot(path)
+                    previous = self.open_documents.get(path)
+                    if previous is None:
+                        await self.lsp_client.notify("textDocument/didOpen", {
+                            "textDocument": {"uri": current.uri,
+                                             "languageId": "c" if path.suffix == ".c" else "cpp",
+                                             "version": 1, "text": current.text}})
+                    elif previous.digest != current.digest:
+                        current.version = previous.version + 1
+                        self.lsp_client.diagnostic_events.setdefault(current.uri, asyncio.Event()).clear()
+                        await self.lsp_client.notify("textDocument/didChange", {
+                            "textDocument": {"uri": current.uri, "version": current.version},
+                            "contentChanges": [{"text": current.text}],
+                            "wantDiagnostics": True})
+                    else:
+                        current.version = previous.version
+                    self.open_documents[path] = current
+                    self.open_documents.move_to_end(path)
+                    await self._evict()
+                yield current
+                latest = await self.snapshot(path)
+                if latest.digest != current.digest:
+                    raise LspError("DOCUMENT_CHANGED", f"File changed during semantic query: {path}")
+            finally:
+                self._active.discard(path)
+                async with self._sync_lock:
+                    await self._evict()
 
+    async def _evict(self):
+        for path in list(self.open_documents):
+            if len(self.open_documents) <= self.max_open_documents:
+                break
+            if path not in self._active:
+                document = self.open_documents.pop(path)
+                await self.lsp_client.notify("textDocument/didClose", {"textDocument": {"uri": document.uri}})
+                self.lsp_client.diagnostics.pop(document.uri, None)
+                self.lsp_client.diagnostic_events.pop(document.uri, None)
+                lock = self._locks.get(path)
+                if lock is not None and not lock.locked():
+                    self._locks.pop(path, None)
+
+    async def close_all_documents(self):
+        for document in list(self.open_documents.values()):
+            await self.lsp_client.notify("textDocument/didClose", {"textDocument": {"uri": document.uri}})
+        self.open_documents.clear()
+        self._locks.clear()
 
 class LSPMethods:
-    def __init__(self, lsp_client: ClangdClient):
-        self.lsp_client = lsp_client
-        self.document_manager = DocumentManager(lsp_client)
-        
-    async def get_definition(self, file: str, line: int, column: int) -> Optional[List[Dict[str, Any]]]:
-        """Get symbol definition"""
-        
-        file_path = Path(file).resolve()
+    POSITION_METHODS = {
+        "definition": ("textDocument/definition", "definitionProvider"),
+        "declaration": ("textDocument/declaration", "declarationProvider"),
+        "implementation": ("textDocument/implementation", "implementationProvider"),
+        "type_definition": ("textDocument/typeDefinition", "typeDefinitionProvider"),
+        "hover": ("textDocument/hover", "hoverProvider"),
+        "references": ("textDocument/references", "referencesProvider"),
+    }
 
-        await self.document_manager.ensure_document_open(file_path)
-        
-        try:
-            config = get_global_config()
-            logger.debug(f"About to send textDocument/definition request")
-            result = await self.lsp_client.request("textDocument/definition", {
-                "textDocument": {"uri": path_to_uri(file_path)},
-                "position": {"line": line - 1, "character": column - 1}
-            }, timeout=config.lsp_definition_timeout)
-        except Exception as e:
-            logger.error(f"Definition request failed: {type(e).__name__}: {e}")
-            logger.error(f"Definition request traceback: {traceback.format_exc()}")
-            raise RuntimeError(f"Definition request failed: {e}")
-        
-        if not result:
-            return None
-            
-        locations = result if isinstance(result, list) else [result]
-        
-        definitions = []
-        for location in locations:
-            if "uri" in location and "range" in location:
-                uri = location["uri"]
-                range_info = location["range"]
-                start = range_info["start"]
-                
-                try:
-                    file_path_def = uri_to_path(uri)
-                    definitions.append({
-                        "file": str(file_path_def),
-                        "line": start["line"] + 1,
-                        "column": start["character"] + 1,
-                        "uri": uri,
-                        "range": range_info
-                    })
-                except Exception as e:
-                    logger.warning(f"Error processing definition location: {e}")
-                    continue
-        
-        return definitions if definitions else None
-    
-    async def get_hover(self, file: str, line: int, column: int) -> Optional[Dict[str, Any]]:
-        """Get hover information"""
-        
-        file_path = Path(file).resolve()
-        
-        await self.document_manager.ensure_document_open(file_path)
-        
-        try:
-            config = get_global_config()
-            result = await self.lsp_client.request("textDocument/hover", {
-                "textDocument": {"uri": path_to_uri(file_path)},
-                "position": {"line": line - 1, "character": column - 1}
-            }, timeout=config.lsp_hover_timeout)
-        except Exception as e:
-            logger.error(f"Hover request failed: {type(e).__name__}: {e}")
-            logger.error(f"Hover request traceback: {traceback.format_exc()}")
-            raise RuntimeError(f"Hover request failed: {e}")
-        
-        if not result:
-            return None
-        
-        contents = result.get("contents", {})
-        range_info = result.get("range")
-        
-        response = {
-            "contents": contents,
-            "file": file,
-            "line": line,
-            "column": column
-        }
-        
-        if range_info:
-            response["range"] = range_info
-        
-        return response
-    
-    async def get_references(self, file: str, line: int, column: int, 
-                           include_declaration: bool = True) -> Optional[List[Dict[str, Any]]]:
-        """Find all references to a symbol"""
-        
-        file_path = Path(file).resolve()
-        
-        await self.document_manager.ensure_document_open(file_path)
-        
-        try:
-            config = get_global_config()
-            result = await self.lsp_client.request("textDocument/references", {
-                "textDocument": {"uri": path_to_uri(file_path)},
-                "position": {"line": line - 1, "character": column - 1},
-                "context": {"includeDeclaration": include_declaration}
-            }, timeout=config.lsp_references_timeout)
-        except Exception as e:
-            logger.error(f"References request failed: {type(e).__name__}: {e}")
-            logger.error(f"References request traceback: {traceback.format_exc()}")
-            raise RuntimeError(f"References request failed: {e}")
-        
-        if not result:
-            return None
-        
-        references = []
-        for location in result:
-            if "uri" in location and "range" in location:
-                uri = location["uri"]
-                range_info = location["range"]
-                start = range_info["start"]
-                
-                try:
-                    file_path_ref = uri_to_path(uri)
-                    references.append({
-                        "file": str(file_path_ref),
-                        "line": start["line"] + 1,
-                        "column": start["character"] + 1,
-                        "uri": uri,
-                        "range": range_info
-                    })
-                except Exception as e:
-                    logger.warning(f"Error processing reference location: {e}")
-                    continue
-        
-        return references if references else None
-    
-    async def search_symbols(self, query: str) -> Optional[List[Dict[str, Any]]]:
-        """Search for symbols in the workspace"""
-        
-        try:
-            result = await self.lsp_client.request("workspace/symbol", {
-                "query": query
-            })
-        except Exception as e:
-            logger.error(f"Symbol search request failed: {type(e).__name__}: {e}")
-            logger.error(f"Symbol search request traceback: {traceback.format_exc()}")
-            raise RuntimeError(f"Symbol search request failed: {e}")
-        
-        if not result:
-            return None
-        
-        symbols = []
-        for symbol in result:
-            try:
-                location = symbol.get("location", {})
-                uri = location.get("uri", "")
-                
-                if uri.startswith("file://"):
-                    file_path = uri_to_path(uri)
-                    range_info = location.get("range", {})
-                    start = range_info.get("start", {})
-                    
-                    symbols.append({
-                        "name": symbol.get("name", ""),
-                        "kind": symbol.get("kind", 0),
-                        "kind_name": self._symbol_kind_to_name(symbol.get("kind", 0)),
-                        "container_name": symbol.get("containerName", ""),
-                        "file": str(file_path),
-                        "line": start.get("line", 0) + 1,
-                        "column": start.get("character", 0) + 1,
-                        "location": location
-                    })
-            except Exception as e:
-                logger.warning(f"Error processing symbol: {e}")
-                continue
-        
-        return symbols if symbols else None
-    
-    def _symbol_kind_to_name(self, kind: int) -> str:
-        """Convert LSP SymbolKind enum to human-readable name"""
-        kind_names = {
-            1: "File", 2: "Module", 3: "Namespace", 4: "Package", 5: "Class",
-            6: "Method", 7: "Property", 8: "Field", 9: "Constructor", 10: "Enum",
-            11: "Interface", 12: "Function", 13: "Variable", 14: "Constant", 15: "String",
-            16: "Number", 17: "Boolean", 18: "Array", 19: "Object", 20: "Key",
-            21: "Null", 22: "EnumMember", 23: "Struct", 24: "Event", 25: "Operator",
-            26: "TypeParameter"
-        }
-        return kind_names.get(kind, f"Unknown({kind})") 
+    def __init__(self, lsp_client, *, max_open_documents=32):
+        self.lsp_client = lsp_client
+        self.document_manager = DocumentManager(
+            lsp_client, max_open_documents=max_open_documents)
+
+    def require(self, capability):
+        if not self.lsp_client.initialized or not self.lsp_client.clangd_server.is_alive:
+            raise LspError("BACKEND_UNAVAILABLE", str(self.lsp_client.failure or "clangd is not ready"))
+        if self.lsp_client.capabilities.get(capability) is None or self.lsp_client.capabilities.get(capability) is False:
+            raise LspError("UNSUPPORTED", f"clangd does not advertise {capability}")
+
+    async def query(self, operation, snapshot, line, column):
+        position = snapshot.position(line, column, self.lsp_client.position_encoding)
+        params = {"textDocument": {"uri": snapshot.uri}, "position": position}
+        if operation in self.POSITION_METHODS:
+            method, capability = self.POSITION_METHODS[operation]
+            self.require(capability)
+            if operation == "references":
+                params["context"] = {"includeDeclaration": True}
+            return await self.lsp_client.request(method, params)
+        if operation in ("callers", "callees", "supertypes", "subtypes"):
+            is_call = operation in ("callers", "callees")
+            self.require("callHierarchyProvider" if is_call else "typeHierarchyProvider")
+            prepared = await self.lsp_client.request(
+                "textDocument/prepareCallHierarchy" if is_call else "textDocument/prepareTypeHierarchy", params)
+            results = []
+            for item in prepared or []:
+                method = {"callers": "callHierarchy/incomingCalls", "callees": "callHierarchy/outgoingCalls",
+                          "supertypes": "typeHierarchy/supertypes", "subtypes": "typeHierarchy/subtypes"}[operation]
+                results.extend(await self.lsp_client.request(method, {"item": item}) or [])
+            return results
+        if operation == "symbol_info":
+            return await self.lsp_client.request("textDocument/symbolInfo", params)
+        raise ValueError(f"Unknown semantic operation: {operation}")
+
+    async def search_symbols(self, query):
+        self.require("workspaceSymbolProvider")
+        return await self.lsp_client.request("workspace/symbol", {"query": query}) or []
+
+    async def document_symbols(self, snapshot):
+        self.require("documentSymbolProvider")
+        return await self.lsp_client.request("textDocument/documentSymbol",
+                                             {"textDocument": {"uri": snapshot.uri}}) or []
+
+    async def diagnostics(self, snapshot):
+        event = self.lsp_client.diagnostic_events.setdefault(snapshot.uri, asyncio.Event())
+        async with asyncio.timeout(self.lsp_client.request_timeout):
+            while True:
+                latest = self.lsp_client.diagnostics.get(snapshot.uri)
+                if latest is not None and latest.get("version") == snapshot.version:
+                    return latest["diagnostics"]
+                event.clear()
+                await event.wait()

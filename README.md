@@ -1,97 +1,86 @@
 # MCP C++ Analyzer
 
-## 项目背景
+面向 AI Agent 的 C/C++ 语义查询 MCP 服务。通过 clangd 和 compile_commands.json，提供批量符号搜索、定义与引用、调用关系、类型层级和诊断查询。
 
-使用AI 编程工具（如 GitHub Copilot、Cursor）辅助C++大型项目开发面临诸多局限性：
+## 使用
 
-**依赖处理效率低下**：为了解决单个用户的问题，现有AI编程工具常常会整体引入整个头文件，甚至包含无关的源代码片段，如果引入的源码文件很大，那么就会导致上下文窗口和Token资源被大量占用，信息冗余，且容易引发理解混乱和响应延迟。 
+需要 Python 3.13+、uv、clangd，以及目标 C/C++ 项目的 compile_commands.json。
 
-**上下文感知能力不足**：现有工具受限于上下文窗口大小，当项目代码超出窗口限制时，会对历史聊天结论内容进行文本压缩或信息截断，导致先前的分析信息丢失。
+在本仓库目录安装依赖：
 
-**静态分析工具集成不足**：在需要获取符号信息时，往往采用简单的文件内容搜索方式，缺乏与clangd等专业静态分析工具的深度集成，导致效率低下和分析结果不够精准。
+~~~powershell
+uv sync --locked --no-build
+~~~
 
-## 项目介绍
+只需在 MCP 客户端中配置 stdio 服务，使用本仓库已安装环境中的 FastMCP。以下是常见 mcp.json 格式，按客户端要求放入对应配置文件并替换路径：
 
-MCP-CPP-Analyzer 是一个专为C++开发设计的Model Context Protocol (MCP) 服务，通过深度整合clangd静态分析工具，为Claude Code、Cursor等支持MCP协议的AI编程工具提供精确的C++代码语义分析能力。该服务通过符号定义查找、引用追踪、悬停信息获取等功能，实现AI工具与专业C++分析工具的无缝集成，解决现有AI编程工具在大型C++项目中的应用局限。
-
-## 安装
-
-### 环境要求
-
-- **Python >= 3.12**
-
-先git clone到本地，然后安装：
-
-```bash
-uv sync //安装相关依赖
-pip install -e .
-```
-
-> 请确保执行 `pip install` 时使用的 Python 版本 >= 3.12。可通过 `python --version` 确认。
-
-## 使用方法
-
-### 前置要求
-
-1. **安装 clangd**：请确保已安装 clangd 并将其添加到系统环境变量（PATH）中
-   
-   - 下载地址：https://releases.llvm.org/download.html
-   
-2. **CPP项目生成 compile_commands.json**：确保项目根目录包含 `compile_commands.json` 文件
-   
-   - CMake项目（非visual studio项目）：`cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON`
-   
-   - visual studio项目：需要使用工具将`sln`文件转换成 compile_commands.json
-   
-     > [CMAKE_EXPORT_COMPILE_COMMANDS — CMake 4.1.0-rc3 Documentation](https://cmake.org/cmake/help/latest/variable/CMAKE_EXPORT_COMPILE_COMMANDS.html)
-
-### MCP 客户端连接
-
-#### Cursor 配置
-
-在 C++ 项目下创建 `.cursor/mcp.json`：
-
-```json
+~~~json
 {
   "mcpServers": {
     "cpp-analyzer": {
-      "command": "mcp-cpp-analyzer",
-      "args": [
-        "serve",
-        "--transport", "stdio",
-        "--compile-db-path", "<compile_commands.json所在目录>"
-      ]
+      "command": "/path/to/mcp-cpp-analyzer/.venv/bin/fastmcp",
+      "args": ["run", "/path/to/mcp-cpp-analyzer/server.py:create_mcp", "--transport", "stdio", "--log-level", "WARNING", "--no-banner"],
+      "cwd": "/path/to/cpp-project",
+      "env": {
+        "CPP_ANALYZER_COMPILE_DB_PATH": "/path/to/build",
+        "CPP_ANALYZER_CLANGD_PATH": "/path/to/clangd"
+      }
     }
   }
 }
-```
+~~~
 
-### 安装 Cursor Rule（可选，推荐）
+Windows 的可执行文件位于 .venv/Scripts/fastmcp.exe。cwd 为待分析项目根目录；CPP_ANALYZER_COMPILE_DB_PATH 为包含 compile_commands.json 的目录；CPP_ANALYZER_CLANGD_PATH 为 clangd 可执行文件。相对环境变量路径以 cwd 为基准，缺失或无效时启动报错。
 
-将内置的 Cursor 规则文件安装到目标 C++ 项目中，引导 AI 优先使用 MCP 工具进行精确的符号分析：
+源码与协议文本固定使用 UTF-8，源码解码失败直接报错，不提供编码配置。--no-banner 同时跳过 FastMCP 启动横幅中的更新检查。
 
-```bash
-# 安装到指定项目目录
-mcp-cpp-analyzer install-rule /path/to/your/cpp-project
+客户端负责启动和关闭 MCP 子进程，不需要提前启动服务。每个独立的 stdio MCP 进程各自启动一份 clangd；同一应用是否复用连接由客户端决定。若客户端支持启动超时配置，建议设为 90 秒；工具超时建议设为 150 秒。
 
-# 安装到当前目录
-mcp-cpp-analyzer install-rule
-```
+默认启用 Code Mode，客户端暴露 search、get_schema、execute 三个工具。先发现接口，再通过 execute 中的 call_tool 批量查询、筛选结果。首次连接通过 execute 调用 workspace_status 核对目标项目。
 
-规则文件会被复制到 `<目标目录>/.cursor/rules/` 下，已存在的同名文件不会被覆盖。
+## 查询接口
 
-## 当前已支持的能力
+以下接口通过 execute 内的 call_tool 调用：
 
-服务器提供以下 MCP 工具：
+| 工具 | 用途 |
+| --- | --- |
+| search_symbols | 一次搜索多个名称，按路径、SymbolKind 过滤，返回 symbol_id |
+| query_symbols | targets × operations 批量语义查询，最多 64 组 |
+| query_files | 多文件符号大纲与当前文档版本的源码诊断 |
+| read_results | 批量翻页或使用 result_id 按需展开完整结果 |
+| workspace_status | clangd 版本、能力、进程失败和索引活动，不依赖后端健康检查通过 |
 
-### `get_definition`
-查找符号定义位置
+query_symbols 支持 definition、declaration、implementation、type_definition、hover、references、callers、callees、supertypes、subtypes、context、symbol_info。
 
-### `get_references` 
-查找符号引用
+execute 示例：
 
-### `get_hover`
-获取符号的悬停信息（类型、文档等）
+~~~python
+result = await call_tool("query_symbols", {
+    "targets": [{"file": "src/client.cpp", "line": 42, "column": 8}],
+    "operations": ["definition", "callers", "callees"],
+    "fields": ["file", "line", "column", "name", "symbol_id"],
+    "limit": 10,
+})
+return result
+~~~
 
-### `diagnose_clangd`
-诊断 `clangd `服务器状态和响应能力
+targets 也可使用 search_symbols 返回的 symbol_id。行列从 1 开始，列按 Unicode 字符计数，制表符计为一个字符。完整结果的 range/call_sites 为 [起始行,起始列,结束行,结束列]，不包含结束位置。
+
+## 结果与分页
+
+- 默认 compact 使用 files 表和 columns/rows，减少重复路径；fields 只返回所需列。
+- detail="standard" 返回具名对象；detail="full" 包含完整范围、签名和源码片段。
+- query_symbols 每批最多 64 个 target/operation 组合，默认最多输出 80 项、24000 字符。
+- truncated 表示结果被截断，用 cursor 继续翻页；result_id 可从头重新展开。二者均传给 read_results 的 cursors 参数。
+- 文件变化会使旧 symbol_id 和结果失效，需要重新发现符号；过期或服务重启后也需要重新查询。
+- 部分失败逐项返回错误，全部失败使用 MCP isError=true；空结果与执行失败不同。跨文件查询依赖 clangd 索引，空结果不能证明全仓不存在。
+
+## 可选配置
+
+在 MCP 客户端配置的 env 中设置：
+
+| 变量 | 默认值 | 用途 |
+| --- | --- | --- |
+| CPP_ANALYZER_TOOL_MODE | code | code 在沙箱内组合查询并筛选返回值；direct 直接暴露批量工具；search 按需发现工具 |
+
+code 使用 FastMCP 的实验性 [Code Mode](https://gofastmcp.com/docs/servers/transforms/code-mode)，每次最多 50 次工具调用、120 秒。search 使用 [Tool Search](https://gofastmcp.com/docs/servers/transforms/tool-search)。
