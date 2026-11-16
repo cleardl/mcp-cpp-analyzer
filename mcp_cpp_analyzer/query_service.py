@@ -351,6 +351,11 @@ class QueryService:
                         locations = {self._location_identity(item) for item in values}
                         if locations <= ast_definitions:
                             metadata["location_kind"] = "ast_definition"
+                        elif len(info or []) == 1 and ast_definitions and locations <= declarations:
+                            # clangd toggles from a definition back to its declaration.
+                            # This API asks for the definition, which the same AST knows.
+                            values = [info[0]["definitionRange"]]
+                            metadata.update(location_kind="ast_definition", declaration_navigation=True)
                         elif locations <= declarations:
                             metadata.update(location_kind="declaration", warnings=["IMPLEMENTATION_UNCONFIRMED"])
                         else:

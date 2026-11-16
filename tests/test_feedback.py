@@ -131,6 +131,27 @@ class FeedbackTests(unittest.IsolatedAsyncioTestCase):
                     "output": str(source.with_suffix(".obj"))} for source in sources]
         (self.root / "compile_commands.json").write_text(json.dumps(entries), encoding="utf-8")
 
+    async def test_definition_at_definition_does_not_misreport_clangd_declaration_toggle(self):
+        header = self.root / "api.h"
+        header.write_text("int function();\n", encoding="utf-8")
+        source = self.root / "api.cpp"
+        source.write_text('#include "api.h"\nint function() { return 42; }\n', encoding="utf-8")
+        self.database([source])
+        service = QueryService(self.config)
+        await service.start()
+        try:
+            target = SymbolTarget(file=str(source), line=2, column=5)
+            definition, declaration = await service.query([target], ["definition", "declaration"])
+            self.assertEqual(definition["location_kind"], "ast_definition", definition)
+            self.assertTrue(definition["declaration_navigation"])
+            self.assertNotIn("IMPLEMENTATION_UNCONFIRMED", definition.get("warnings", []))
+            self.assertEqual(len(definition["items"]), 1)
+            self.assertEqual(Path(definition["items"][0]["file"]), source)
+            self.assertEqual(definition["items"][0]["line"], 2)
+            self.assertEqual(Path(declaration["items"][0]["file"]), header)
+        finally:
+            await service.stop()
+
     async def test_same_usr_in_separate_targets_uses_callsite_ast_and_keeps_index_conflicts(self):
         sources = []
         for name in ("a", "b"):

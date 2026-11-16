@@ -59,6 +59,7 @@ return result
 - 跨文件结果依赖 clangd 索引，空结果不能证明全仓不存在，诊断不等同工程编译。
 - index_activity 区分未观察到索引、索引中和空闲；空闲不代表全工程覆盖，index_complete 保持未知。空的索引查询返回 INDEX_COVERAGE_UNVERIFIED。
 - definition 的 location_kind 区分 AST 定义、声明和索引位置；仅有声明时返回 IMPLEMENTATION_UNCONFIRMED。
+- 在定义处查询时，clangd 可能回跳声明；同一 AST 已知定义时归一到定义位置，并标记 declaration_navigation=true。
 - 调用结果保留调用点。能够用调用点 AST 确认定义时优先使用该位置；与索引冲突时同时保留 index_location 和警告，fields 也不能隐藏冲突证据。linkage_verified=false 表示未验证最终链接选择。
 
 Code Mode 每次最多 50 次内部工具调用、120 秒。CPP_ANALYZER_TOOL_MODE 默认为 code；direct 或 search 需显式设置。
