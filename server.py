@@ -4,8 +4,9 @@ import sys
 from pathlib import Path
 
 def main():
-    from mcp_cpp_analyzer.stdio import reserve_protocol_stdout
-    reserve_protocol_stdout()
+    from mcp_cpp_analyzer.stdio import reserve_protocol_stdout, serve_stdio
+    protocol = reserve_protocol_stdout()
+    import anyio
     from mcp_cpp_analyzer.config import Config
     from mcp_cpp_analyzer.server import create_server
 
@@ -16,7 +17,7 @@ def main():
         os.environ["MONTY_BIN"] = str(sandbox)
     backend = Path(sys.argv[0]).resolve().with_name("clangd.exe")
     config = Config.from_environment(clangd_path=backend)
-    create_server(config).run(transport="stdio", show_banner=False, log_level="WARNING")
+    anyio.run(serve_stdio, create_server(config), protocol)
 
 
 if __name__ == "__main__":

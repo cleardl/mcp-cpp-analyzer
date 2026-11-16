@@ -22,10 +22,28 @@ def reserve_protocol_stdout():
             kernel32.SetStdHandle.restype = wintypes.BOOL
             if not kernel32.SetStdHandle(-11, msvcrt.get_osfhandle(2)):
                 raise ctypes.WinError(ctypes.get_last_error())
-        # MCP writes through this private duplicate. Native fd/Win32 stdout logs
-        # continue to stderr, including messages emitted before lifespan starts.
-        sys.stdout = io.TextIOWrapper(os.fdopen(protocol_fd, "wb", buffering=0),
-                                      encoding="utf-8", write_through=True)
+        protocol = io.TextIOWrapper(os.fdopen(protocol_fd, "wb", buffering=0),
+                                    encoding="utf-8", write_through=True)
+        # Both Python print() and native stdout belong to diagnostics. Only the
+        # MCP transport receives the private protocol stream.
+        sys.stdout = sys.stderr
+        return protocol
     except BaseException:
         os.close(protocol_fd)
         raise
+
+
+async def serve_stdio(server, protocol):
+    import anyio
+    from fastmcp.server.context import reset_transport, set_transport
+    from mcp.server.stdio import stdio_server
+
+    token = set_transport("stdio")
+    try:
+        async with stdio_server(stdout=anyio.wrap_file(protocol)) as (reader, writer):
+            # FastMCP 4.2's runner cannot accept explicit streams. Its low-level
+            # server drives the same FastMCP lifespan through the installed proxy.
+            low_level = server._mcp_server
+            await low_level.run(reader, writer, low_level.create_initialization_options())
+    finally:
+        reset_transport(token)

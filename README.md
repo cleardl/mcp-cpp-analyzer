@@ -76,7 +76,7 @@ uv sync --locked --group build
 
 构建前须提交源码并保持工作区干净；程序嵌入版本和 Git revision，通过 workspace_status.build 可核对来源。输出 exe 和第三方许可清单；clangd 及资源目录单独随包发布。
 
-入口在导入运行框架前保留协议管道，将原生 stdout 日志导向 stderr；内置 UTF-8、stdio 和关闭启动横幅。Code Mode 的 Monty worker 一并封装在 exe 中，运行时固定使用随包程序。发布前验证 Code Mode、真实语义查询、随包 clangd 资源和正常退出清理。
+入口在导入运行框架前保留独立协议管道，将 Python print 与原生 stdout 日志导向 stderr，再向 MCP 传入显式协议流；内置 UTF-8、stdio 和关闭启动横幅。Code Mode 的 Monty worker 一并封装在 exe 中，运行时固定使用随包程序。发布前验证 Code Mode、真实语义查询、随包 clangd 资源和正常退出清理。
 
 回归检查使用 stdlib unittest，只启动 clangd 解析测试文件，不调用 C/C++ 编译器。设置 CPP_ANALYZER_TEST_CLANGD 指向 clangd 后运行：
 

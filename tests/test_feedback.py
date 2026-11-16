@@ -11,6 +11,7 @@ import tempfile
 import unittest
 
 from fastmcp import Client
+from fastmcp.client.transports import StdioTransport
 from mcp_cpp_analyzer.clangd_client import ClangdClient
 from mcp_cpp_analyzer.config import Config
 from mcp_cpp_analyzer.query_service import BoundedStore, QueryService, SymbolTarget, compact_payload
@@ -169,7 +170,8 @@ class FeedbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_native_fd_and_windows_handle_logs_do_not_enter_protocol_stdout(self):
         script = '''import ctypes, json, os
 from mcp_cpp_analyzer.stdio import reserve_protocol_stdout
-reserve_protocol_stdout()
+protocol = reserve_protocol_stdout()
+print("python-print-log", flush=True)
 os.write(1, b"native-fd-log\\n")
 if os.name == "nt":
     from ctypes import wintypes
@@ -181,14 +183,48 @@ if os.name == "nt":
     written = wintypes.DWORD()
     if not kernel.WriteFile(kernel.GetStdHandle(-11), data, len(data), ctypes.byref(written), None):
         raise ctypes.WinError(ctypes.get_last_error())
-print(json.dumps({"protocol": True}), flush=True)
+protocol.write(json.dumps({"protocol": True}) + "\\n")
+protocol.flush()
 '''
         result = await asyncio.to_thread(subprocess.run, [sys.executable, "-X", "utf8", "-B", "-c", script],
                                           cwd=ROOT, capture_output=True, encoding="utf-8", check=True)
         self.assertEqual(json.loads(result.stdout), {"protocol": True})
         self.assertIn("native-fd-log", result.stderr)
+        self.assertIn("python-print-log", result.stderr)
         if os.name == "nt":
             self.assertIn("native-handle-log", result.stderr)
+
+    async def test_explicit_stdio_stream_preserves_lifespan_and_isolates_python_prints(self):
+        script = '''from mcp_cpp_analyzer.stdio import reserve_protocol_stdout, serve_stdio
+protocol = reserve_protocol_stdout()
+import anyio
+from fastmcp import FastMCP
+from fastmcp.server.lifespan import lifespan
+@lifespan
+async def life(server):
+    print("lifespan-print", flush=True)
+    try:
+        yield {"value": 42}
+    finally:
+        print("lifespan-closed", flush=True)
+server = FastMCP("stdio-isolation-test", lifespan=life)
+@server.tool
+def answer() -> dict:
+    print("handler-print", flush=True)
+    return {"answer": 42}
+anyio.run(serve_stdio, server, protocol)
+'''
+        log = self.root / "stderr.log"
+        transport = StdioTransport(command=sys.executable, args=["-X", "utf8", "-B", "-c", script],
+                                   cwd=str(ROOT), keep_alive=False, log_file=log)
+        with self.assertNoLogs("mcp.client.stdio", level="ERROR"):
+            async with Client(transport, timeout=20) as client:
+                response = await client.call_tool_mcp("answer", {})
+                self.assertFalse(response.is_error)
+                self.assertEqual(response.structured_content, {"answer": 42})
+        diagnostics = log.read_text(encoding="utf-8")
+        for message in ("lifespan-print", "handler-print", "lifespan-closed"):
+            self.assertIn(message, diagnostics)
 
 
 if __name__ == "__main__":
