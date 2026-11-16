@@ -113,7 +113,8 @@ def ensure_connection(profile):
         atomic_json(Path(profile["profile_path"]), profile)
         definition = directory / "task.xml"
         definition.write_text(task_xml(profile["backend_command"],
-            [*profile["backend_arguments"], "--profile", profile["profile_path"]], profile["workspace"]),
+            [*profile["backend_arguments"], "--profile", profile["profile_path"]],
+            Path(profile["backend_command"]).parent),
             encoding="utf-16")
         launch_task(profile["task_name"], definition)
         deadline, last_run = time.monotonic() + STARTUP_SECONDS, time.monotonic()
