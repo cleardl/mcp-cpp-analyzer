@@ -4,15 +4,15 @@
 
 ## 二进制部署
 
-Windows 发布程序使用 stdio，默认启用 Code Mode。Python、FastMCP 和 Code Mode 运行依赖已包含在程序中，使用端无需安装 Python 或保留源码。
+Windows 发布程序使用 stdio 轻量代理，默认启用 Code Mode。Python、FastMCP 和 Code Mode 运行依赖已随包提供，使用端无需安装 Python 或保留源码。
 
-将 mcp-cpp-analyzer.exe 与 clangd.exe 放在同一个 bin 目录，保留与 bin 相邻的 lib/clang 资源目录。客户端配置示例：
+发布目录的 bin 中包含 mcp-cpp-analyzer-proxy.exe、mcp-cpp-analyzer-backend.exe、_proxy 运行库和 clangd.exe；保留与 bin 相邻的 lib/clang 资源目录。客户端配置示例：
 
 ~~~json
 {
   "mcpServers": {
     "cpp-analyzer": {
-      "command": "C:/tools/cpp-analyzer/bin/mcp-cpp-analyzer.exe",
+      "command": "C:/tools/cpp-analyzer/bin/mcp-cpp-analyzer-proxy.exe",
       "cwd": "C:/work/cpp-project",
       "env": {
         "CPP_ANALYZER_COMPILE_DB_PATH": "C:/work/build"
@@ -24,7 +24,16 @@ Windows 发布程序使用 stdio，默认启用 Code Mode。Python、FastMCP 和
 
 编译数据库目录须包含 compile_commands.json；相对路径以 cwd 为基准。源码和协议文本固定使用 UTF-8，解码失败直接报错。服务不检查更新，不需要额外后端配置文件或启动参数。
 
-客户端负责进程生命周期，每个独立服务进程复用一份 clangd。启动超时建议 90 秒，工具超时建议 150 秒。首次连接通过 execute 调用 workspace_status 核对目标工作区与数据库。
+启动超时建议 90 秒，工具超时建议 150 秒。首次连接通过 execute 调用 workspace_status 核对工作区、数据库、shared_backend.pid 与 clangd_pid。
+
+## 共享后台生命周期
+
+- 每个客户端只启动标准库代理。同一 Windows 用户、安装目录、源码目录、编译数据库、工具模式和程序构建复用一个后台，clangd、索引、符号句柄与有界结果缓存均共享；不同工作区隔离。
+- 首个代理通过互斥锁创建并运行用户级按需任务，由任务启动独立后台，不依附首个客户端的 Job Object。没有登录、开机或定时触发器；启动失败直接报告 Task Scheduler 错误。
+- 关闭一个客户端只断开它的连接。最后一个代理断开 30 秒后，后台关闭 clangd、删除按需任务并退出；期间重新接入会复用已有后台。
+- 后台异常退出时，Windows Job Object 清理其子进程；现有代理重连并恢复协议会话，无需重启 Agent。进行中的查询返回 BACKEND_RESTARTED，不重放；旧句柄需重新发现。
+
+后台仅监听本机回环地址，代理和后台双向认证。运行状态位于当前用户 LocalAppData 下的 mcp-cpp-analyzer，目录仅当前用户与 SYSTEM 可访问；端点和任务元数据由程序生成，无需另写配置。workspace_status.shared_backend.runtime_directory 可用于定位日志。
 
 ## 查询接口
 
@@ -64,7 +73,7 @@ return result
 
 Code Mode 每次最多 50 次内部工具调用、120 秒。CPP_ANALYZER_TOOL_MODE 默认为 code；direct 或 search 需显式设置。
 
-外层工具只返回一份 structuredContent，Code Mode 内部使用结构化对象串联查询；不再附加相同 JSON 的文本副本。工具错误仍保留 isError 和错误内容。fields 的允许值同时提供在完整 JSON schema 和简略参数说明中。
+Code Mode 对对象结果只保留一份 structuredContent，不附加相同 JSON 的文本副本；非结构化结果与工具错误保留 content。fields 的允许值同时提供在完整 JSON schema 和简略参数说明中。
 
 ## 开发者构建
 
@@ -75,9 +84,9 @@ uv sync --locked --group build
 .venv/Scripts/python.exe -X utf8 -B build.py --output dist
 ~~~
 
-构建前须提交源码并保持工作区干净；程序嵌入版本和 Git revision，通过 workspace_status.build 可核对来源。输出 exe 和第三方许可清单；clangd 及资源目录单独随包发布。
+构建前须提交源码并保持工作区干净；代理与后台嵌入相同版本和 Git revision，通过 workspace_status.build 可核对来源。输出两个 exe、_proxy 运行库和第三方许可清单；clangd 及资源目录单独随包发布。
 
-入口在导入运行框架前保留独立协议管道，将 Python print 与原生 stdout 日志导向 stderr，再向 MCP 传入显式协议流；内置 UTF-8、stdio 和关闭启动横幅。Code Mode 的 Monty worker 一并封装在 exe 中，运行时固定使用随包程序。发布前验证 Code Mode、真实语义查询、随包 clangd 资源和正常退出清理。
+代理在导入运行逻辑前保留独立协议管道，将 Python print 与原生 stdout 日志导向 stderr；不导入 FastMCP、Pydantic 或沙箱。后台通过独立连接收发协议，日志写入运行目录，Monty worker 随后台封装。发布前验证多会话复用、工作区隔离、首个客户端退出、后台异常恢复、空闲清理及真实语义查询。
 
 回归检查使用 stdlib unittest，只启动 clangd 解析测试文件，不调用 C/C++ 编译器。设置 CPP_ANALYZER_TEST_CLANGD 指向 clangd 后运行：
 

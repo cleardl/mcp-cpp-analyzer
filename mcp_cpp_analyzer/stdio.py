@@ -31,19 +31,3 @@ def reserve_protocol_stdout():
     except BaseException:
         os.close(protocol_fd)
         raise
-
-
-async def serve_stdio(server, protocol):
-    import anyio
-    from fastmcp.server.context import reset_transport, set_transport
-    from mcp.server.stdio import stdio_server
-
-    token = set_transport("stdio")
-    try:
-        async with stdio_server(stdout=anyio.wrap_file(protocol)) as (reader, writer):
-            # FastMCP 4.2's runner cannot accept explicit streams. Its low-level
-            # server drives the same FastMCP lifespan through the installed proxy.
-            low_level = server._mcp_server
-            await low_level.run(reader, writer, low_level.create_initialization_options())
-    finally:
-        reset_transport(token)

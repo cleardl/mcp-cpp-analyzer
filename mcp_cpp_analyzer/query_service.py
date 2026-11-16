@@ -87,6 +87,7 @@ class QueryService:
         self.handles = BoundedStore(max_entries=4096, max_bytes=4 * 1024 * 1024)
         self.pages = BoundedStore(max_entries=128, ttl=300)
         self._semaphore = asyncio.Semaphore(config.concurrency)
+        self.runtime_status = None
 
     async def start(self):
         await self.client.start()
@@ -111,6 +112,8 @@ class QueryService:
             "workspace": str(self.config.workspace_root), "compile_db": str(self.config.find_compile_commands()),
             "failure": str(self.client.failure) if self.client.failure else None,
             "pending_requests": len(self.client.pending_requests),
+            "clangd_pid": self.backend.process.pid if self.backend.is_alive else None,
+            **({"shared_backend": self.runtime_status()} if self.runtime_status is not None else {}),
             "open_documents": len(self.documents.open_documents),
             "index_complete": None, "active_progress": list(self.client.progress.values()),
             "index_activity": {"state": index_state, "last_progress": progress,

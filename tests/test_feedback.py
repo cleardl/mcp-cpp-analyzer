@@ -216,8 +216,9 @@ protocol.flush()
             self.assertIn("native-handle-log", result.stderr)
 
     async def test_explicit_stdio_stream_preserves_lifespan_and_isolates_python_prints(self):
-        script = '''from mcp_cpp_analyzer.stdio import reserve_protocol_stdout, serve_stdio
+        script = '''from mcp_cpp_analyzer.stdio import reserve_protocol_stdout
 protocol = reserve_protocol_stdout()
+from mcp_cpp_analyzer.transport import serve_stdio
 import anyio
 from fastmcp import FastMCP
 from fastmcp.server.lifespan import lifespan
