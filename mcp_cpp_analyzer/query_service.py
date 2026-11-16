@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .clangd_client import ClangdClient, LspError
 from .clangd_server import ClangdServer
 from .lsp_methods import LSPMethods
+from . import __version__, build_info
 
 Operation = Literal["definition", "declaration", "implementation", "type_definition", "hover",
                     "references", "callers", "callees", "supertypes", "subtypes", "context", "symbol_info"]
@@ -98,16 +99,56 @@ class QueryService:
             await self.client.stop()
 
     def status(self):
+        progress = self.client.index_progress
+        index_state = ("disabled" if not self.config.background_index else
+                       "not_observed" if progress is None else
+                       "idle" if progress["kind"] == "end" else "indexing")
         return {
             "ready": self.client.initialized and self.backend.is_alive,
+            "service_version": __version__,
+            "build": build_info(),
             "server": self.client.server_info, "position_encoding": self.client.position_encoding,
             "workspace": str(self.config.workspace_root), "compile_db": str(self.config.find_compile_commands()),
             "failure": str(self.client.failure) if self.client.failure else None,
             "pending_requests": len(self.client.pending_requests),
             "open_documents": len(self.documents.open_documents),
             "index_complete": None, "active_progress": list(self.client.progress.values()),
+            "index_activity": {"state": index_state, "last_progress": progress,
+                               "completed_runs": self.client.index_runs_completed},
             "capabilities": self.client.capabilities, "stderr_tail": self.backend.stderr_tail,
         }
+
+    @staticmethod
+    def _location_identity(item):
+        if "targetUri" in item:
+            uri, span = item["targetUri"], item.get("targetSelectionRange", item["targetRange"])
+        else:
+            item = item.get("location", item)
+            uri, span = item["uri"], item.get("selectionRange", item["range"])
+        return (Path.from_uri(uri).resolve(), span["start"]["line"], span["start"]["character"])
+
+    async def _callee_location(self, value, snapshot, detail, snapshots):
+        related = value["to"]
+        row = await self._location(related, detail=detail, snapshots=snapshots)
+        row["location_source"] = "index_unverified"
+        sites = value.get("fromRanges", [])
+        if not sites:
+            return row
+        position = sites[0]["start"]
+        info = await self.methods.query("symbol_info", snapshot, position["line"] + 1,
+            snapshot.column(position["line"], position["character"], self.client.position_encoding))
+        matches = [item for item in info or [] if item.get("id") == related.get("data")]
+        if len(matches) == 1 and matches[0].get("definitionRange"):
+            definition = matches[0]["definitionRange"]
+            original = row
+            row = await self._location({**definition,
+                **{name: related[name] for name in ("name", "kind", "containerName") if name in related}},
+                detail=detail, snapshots=snapshots)
+            row["location_source"] = "ast_definition"
+            if self._location_identity(definition) != self._location_identity(related):
+                row["ambiguity"] = "index_location_conflict"
+                row["index_location"] = {key: original[key] for key in ("file", "line", "column", "name") if key in original}
+        return row
 
     def file_path(self, value):
         path = Path(value)
@@ -195,12 +236,18 @@ class QueryService:
         for value in values:
             if operation in ("callers", "callees"):
                 related = dict(value["from" if operation == "callers" else "to"])
-                if detail == "full":
-                    related["call_sites"] = value.get("fromRanges", [])
-                row = await self._location(related, detail=detail, snapshots=snapshots)
-                if detail == "full":
-                    sites_source = snapshots[Path(row["file"])] if operation == "callers" else snapshot
-                    row["call_sites"] = [self._range(sites_source, span) for span in related["call_sites"]]
+                if operation == "callees":
+                    row = await self._callee_location(value, snapshot, detail, snapshots)
+                else:
+                    row = await self._location(related, detail=detail, snapshots=snapshots)
+                    row["location_source"] = "index_unverified"
+                sites_source = snapshots[Path(row["file"])] if operation == "callers" else snapshot
+                sites = value.get("fromRanges", [])
+                cap = 64 if detail == "full" else 4
+                row["call_site_file"] = str(sites_source.path)
+                row["call_sites"] = [self._range(sites_source, span) for span in sites[:cap]]
+                if len(sites) > cap:
+                    row["call_sites_truncated"] = True
             elif operation == "diagnostics":
                 row = await self._location({**value, "uri": snapshot.uri}, detail=detail, snapshots=snapshots)
             else:
@@ -225,9 +272,22 @@ class QueryService:
             rows = await self._rows(entry["op"], selected, snapshot=snapshot, detail=detail)
         next_offset = offset + len(selected)
         key = (key or self.pages.put(entry)) if values else None
+        document_local = entry.get("source") and entry["op"] in ("symbols", "diagnostics", "hover", "context", "symbol_info")
         result = {"op": entry["op"], "items": rows, "returned": len(rows),
                   "backend_returned": len(values), "truncated": next_offset < len(values),
-                  "coverage": "index-dependent", "_key": key, "_offset": offset}
+                  "coverage": "document" if document_local else "index-dependent", "_key": key, "_offset": offset,
+                  **entry.get("metadata", {})}
+        warnings = list(result.get("warnings", []))
+        if not document_local and not values:
+            warnings.append("INDEX_COVERAGE_UNVERIFIED")
+        if any(row.get("ambiguity") for row in rows):
+            warnings.append("INDEX_LOCATION_CONFLICT")
+        if entry["op"] in ("callers", "callees"):
+            result["linkage_verified"] = False
+            if any(row.get("location_source") == "index_unverified" for row in rows):
+                warnings.append("CALL_LOCATION_UNVERIFIED")
+        if warnings:
+            result["warnings"] = list(dict.fromkeys(warnings))
         if key:
             result["result_id"] = key
         if next_offset < len(values):
@@ -281,9 +341,23 @@ class QueryService:
                         values = [raw] if raw else []
                     else:
                         values = raw if isinstance(raw, list) else ([raw] if raw else [])
+                    metadata = {}
+                    if operation == "definition" and values:
+                        info = await self.methods.query("symbol_info", snapshot, target["line"], target["column"])
+                        ast_definitions = {self._location_identity(item["definitionRange"])
+                                           for item in info or [] if item.get("definitionRange")}
+                        declarations = {self._location_identity(item["declarationRange"])
+                                        for item in info or [] if item.get("declarationRange")}
+                        locations = {self._location_identity(item) for item in values}
+                        if locations <= ast_definitions:
+                            metadata["location_kind"] = "ast_definition"
+                        elif locations <= declarations:
+                            metadata.update(location_kind="declaration", warnings=["IMPLEMENTATION_UNCONFIRMED"])
+                        else:
+                            metadata["location_kind"] = "indexed_location"
                     page = await self._page({"op": operation, "values": values, "source": str(path),
                                              "digest": snapshot.digest, "line": target["line"],
-                                             "column": target["column"]}, limit=limit, detail=detail)
+                                             "column": target["column"], "metadata": metadata}, limit=limit, detail=detail)
                     return {"target": index, **page}
                 jobs = [(i, op, self._bounded(lambda i=i, t=t, op=op: one(i, t, op)))
                         for i, t in members for op in operations]
@@ -338,6 +412,22 @@ def compact_payload(results, root, *, detail="compact", fields=None):
     paths = []
     converted = []
     errors = sum("error" in result for result in results)
+    def map_files(value):
+        if isinstance(value, list):
+            return [map_files(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        converted = {}
+        for key, item in value.items():
+            if key in ("file", "call_site_file") and isinstance(item, str):
+                path = Path(item)
+                name = str(path.relative_to(root)).replace("\\", "/") if path.is_relative_to(root) else str(path)
+                if name not in paths:
+                    paths.append(name)
+                converted[key] = paths.index(name)
+            else:
+                converted[key] = map_files(item)
+        return converted
     for result in results:
         item = {key: value for key, value in result.items() if not key.startswith("_")}
         rows = item.pop("items", [])
@@ -345,17 +435,15 @@ def compact_payload(results, root, *, detail="compact", fields=None):
             normalized = []
             for row in rows:
                 row = dict(row)
-                if "file" in row:
-                    path = Path(row["file"])
-                    name = str(path.relative_to(root)).replace("\\", "/") if path.is_relative_to(root) else str(path)
-                    if name not in paths:
-                        paths.append(name)
-                    row["file"] = paths.index(name)
-                normalized.append(row)
-            if fields:
-                normalized = [{**{key: row[key] for key in fields if key in row},
-                               **{key: True for key in ("text_truncated", "source_truncated") if row.get(key) is True}}
-                              for row in normalized]
+                if fields:
+                    protected = {key: row[key] for key in ("location_source", "ambiguity", "index_location") if key in row}
+                    if row.get("ambiguity"):
+                        protected.update({key: row[key] for key in ("file", "line", "column", "call_site_file", "call_sites")
+                                          if key in row})
+                    row = {**{key: row[key] for key in fields if key in row}, **protected,
+                           **{key: True for key in ("text_truncated", "source_truncated", "call_sites_truncated")
+                              if row.get(key) is True}}
+                normalized.append(map_files(row))
             if detail == "compact":
                 columns = list(dict.fromkeys(key for row in normalized for key in row))
                 item["columns"] = columns

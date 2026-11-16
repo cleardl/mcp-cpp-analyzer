@@ -1,58 +1,44 @@
 # MCP C++ Analyzer
 
-面向 AI Agent 的 C/C++ 语义查询 MCP 服务。通过 clangd 和 compile_commands.json，提供批量符号搜索、定义与引用、调用关系、类型层级和诊断查询。
+面向 AI Agent 的 C/C++ 语义查询服务。通过 clangd 和 compile_commands.json，提供批量符号搜索、定义与引用、调用关系、类型层级和当前文档诊断。
 
-## 使用
+## 二进制部署
 
-需要 Python 3.13+、uv、clangd，以及目标 C/C++ 项目的 compile_commands.json。
+Windows 发布程序使用 stdio，默认启用 Code Mode。Python、FastMCP 和 Code Mode 运行依赖已包含在程序中，使用端无需安装 Python 或保留源码。
 
-在本仓库目录安装依赖：
-
-~~~powershell
-uv sync --locked --no-build
-~~~
-
-只需在 MCP 客户端中配置 stdio 服务，使用本仓库已安装环境中的 FastMCP。以下是常见 mcp.json 格式，按客户端要求放入对应配置文件并替换路径：
+将 mcp-cpp-analyzer.exe 与 clangd.exe 放在同一个 bin 目录，保留与 bin 相邻的 lib/clang 资源目录。客户端配置示例：
 
 ~~~json
 {
   "mcpServers": {
     "cpp-analyzer": {
-      "command": "/path/to/mcp-cpp-analyzer/.venv/bin/fastmcp",
-      "args": ["run", "/path/to/mcp-cpp-analyzer/server.py:create_mcp", "--transport", "stdio", "--log-level", "WARNING", "--no-banner"],
-      "cwd": "/path/to/cpp-project",
+      "command": "C:/tools/cpp-analyzer/bin/mcp-cpp-analyzer.exe",
+      "cwd": "C:/work/cpp-project",
       "env": {
-        "CPP_ANALYZER_COMPILE_DB_PATH": "/path/to/build",
-        "CPP_ANALYZER_CLANGD_PATH": "/path/to/clangd"
+        "CPP_ANALYZER_COMPILE_DB_PATH": "C:/work/build"
       }
     }
   }
 }
 ~~~
 
-Windows 的可执行文件位于 .venv/Scripts/fastmcp.exe。cwd 为待分析项目根目录；CPP_ANALYZER_COMPILE_DB_PATH 为包含 compile_commands.json 的目录；CPP_ANALYZER_CLANGD_PATH 为 clangd 可执行文件。相对环境变量路径以 cwd 为基准，缺失或无效时启动报错。
+编译数据库目录须包含 compile_commands.json；相对路径以 cwd 为基准。源码和协议文本固定使用 UTF-8，解码失败直接报错。服务不检查更新，不需要额外后端配置文件或启动参数。
 
-源码与协议文本固定使用 UTF-8，源码解码失败直接报错，不提供编码配置。--no-banner 同时跳过 FastMCP 启动横幅中的更新检查。
-
-客户端负责启动和关闭 MCP 子进程，不需要提前启动服务。每个独立的 stdio MCP 进程各自启动一份 clangd；同一应用是否复用连接由客户端决定。若客户端支持启动超时配置，建议设为 90 秒；工具超时建议设为 150 秒。
-
-默认启用 Code Mode，客户端暴露 search、get_schema、execute 三个工具。先发现接口，再通过 execute 中的 call_tool 批量查询、筛选结果。首次连接通过 execute 调用 workspace_status 核对目标项目。
+客户端负责进程生命周期，每个独立服务进程复用一份 clangd。启动超时建议 90 秒，工具超时建议 150 秒。首次连接通过 execute 调用 workspace_status 核对目标工作区与数据库。
 
 ## 查询接口
 
-以下接口通过 execute 内的 call_tool 调用：
+客户端暴露 search、get_schema、execute。先发现接口，再在 execute 中通过 await call_tool(name, arguments) 批量查询、筛选并 return：
 
-| 工具 | 用途 |
+| 内部工具 | 用途 |
 | --- | --- |
-| search_symbols | 一次搜索多个名称，按路径、SymbolKind 过滤，返回 symbol_id |
+| search_symbols | 批量名称发现、路径和 SymbolKind 过滤，返回 symbol_id |
 | query_symbols | targets × operations 批量语义查询，最多 64 组 |
-| query_files | 多文件符号大纲与当前文档版本的源码诊断 |
-| read_results | 批量翻页或使用 result_id 按需展开完整结果 |
-| workspace_status | clangd 版本、能力、进程失败和索引活动，不依赖后端健康检查通过 |
+| query_files | 多文件符号大纲与当前文档版本诊断 |
+| read_results | 批量分页或按 result_id 展开缓存结果 |
+| workspace_status | clangd 能力、进程失败、工作区和索引活动 |
 
 query_symbols 支持 definition、declaration、implementation、type_definition、hover、references、callers、callees、supertypes、subtypes、context、symbol_info。
-
-execute 示例：
 
 ~~~python
 result = await call_tool("query_symbols", {
@@ -64,23 +50,36 @@ result = await call_tool("query_symbols", {
 return result
 ~~~
 
-targets 也可使用 search_symbols 返回的 symbol_id。行列从 1 开始，列按 Unicode 字符计数，制表符计为一个字符。完整结果的 range/call_sites 为 [起始行,起始列,结束行,结束列]，不包含结束位置。
+优先复用符号发现返回的 symbol_id。位置从 1 开始，列按 Unicode codepoint 计数，制表符计为一个字符。
 
-## 结果与分页
+- compact 使用 files 与 columns/rows；fields 投影所需列，保留文件映射与分页、错误信息。
+- standard 返回具名对象，full 按需包含详细范围和源码。默认输出预算为 80 项、24000 字符。
+- truncated 时用 cursor 继续；result_id 可从头展开，二者传给 read_results 的 cursors。
+- 文件变化、句柄过期或进程重启后重新发现。部分失败逐项返回，全部失败使用 MCP isError=true。
+- 跨文件结果依赖 clangd 索引，空结果不能证明全仓不存在，诊断不等同工程编译。
+- index_activity 区分未观察到索引、索引中和空闲；空闲不代表全工程覆盖，index_complete 保持未知。空的索引查询返回 INDEX_COVERAGE_UNVERIFIED。
+- definition 的 location_kind 区分 AST 定义、声明和索引位置；仅有声明时返回 IMPLEMENTATION_UNCONFIRMED。
+- 调用结果保留调用点。能够用调用点 AST 确认定义时优先使用该位置；与索引冲突时同时保留 index_location 和警告，fields 也不能隐藏冲突证据。linkage_verified=false 表示未验证最终链接选择。
 
-- 默认 compact 使用 files 表和 columns/rows，减少重复路径；fields 只返回所需列。
-- detail="standard" 返回具名对象；detail="full" 包含完整范围、签名和源码片段。
-- query_symbols 每批最多 64 个 target/operation 组合，默认最多输出 80 项、24000 字符。
-- truncated 表示结果被截断，用 cursor 继续翻页；result_id 可从头重新展开。二者均传给 read_results 的 cursors 参数。
-- 文件变化会使旧 symbol_id 和结果失效，需要重新发现符号；过期或服务重启后也需要重新查询。
-- 部分失败逐项返回错误，全部失败使用 MCP isError=true；空结果与执行失败不同。跨文件查询依赖 clangd 索引，空结果不能证明全仓不存在。
+Code Mode 每次最多 50 次内部工具调用、120 秒。CPP_ANALYZER_TOOL_MODE 默认为 code；direct 或 search 需显式设置。
 
-## 可选配置
+外层工具只返回一份 structuredContent，Code Mode 内部使用结构化对象串联查询；不再附加相同 JSON 的文本副本。工具错误仍保留 isError 和错误内容。fields 的允许值同时提供在完整 JSON schema 和简略参数说明中。
 
-在 MCP 客户端配置的 env 中设置：
+## 开发者构建
 
-| 变量 | 默认值 | 用途 |
-| --- | --- | --- |
-| CPP_ANALYZER_TOOL_MODE | code | code 在沙箱内组合查询并筛选返回值；direct 直接暴露批量工具；search 按需发现工具 |
+构建需要 Python 3.13+ 和 uv，使用 PyInstaller 收集解释器与依赖，不编译为 C。打包工具通过 build 依赖组锁定，与使用端无关：
 
-code 使用 FastMCP 的实验性 [Code Mode](https://gofastmcp.com/docs/servers/transforms/code-mode)，每次最多 50 次工具调用、120 秒。search 使用 [Tool Search](https://gofastmcp.com/docs/servers/transforms/tool-search)。
+~~~powershell
+uv sync --locked --group build
+.venv/Scripts/python.exe -X utf8 -B build.py --output dist
+~~~
+
+构建前须提交源码并保持工作区干净；程序嵌入版本和 Git revision，通过 workspace_status.build 可核对来源。输出 exe 和第三方许可清单；clangd 及资源目录单独随包发布。
+
+入口在导入运行框架前保留协议管道，将原生 stdout 日志导向 stderr；内置 UTF-8、stdio 和关闭启动横幅。Code Mode 的 Monty worker 一并封装在 exe 中，运行时固定使用随包程序。发布前验证 Code Mode、真实语义查询、随包 clangd 资源和正常退出清理。
+
+回归检查使用 stdlib unittest，只启动 clangd 解析测试文件，不调用 C/C++ 编译器。设置 CPP_ANALYZER_TEST_CLANGD 指向 clangd 后运行：
+
+~~~powershell
+.venv/Scripts/python.exe -X utf8 -B -m unittest discover -s tests -v
+~~~

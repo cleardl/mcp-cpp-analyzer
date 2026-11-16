@@ -1,16 +1,18 @@
 """FastMCP 4 server: five batch-first tools, with optional discovery/code transforms."""
 import asyncio
 import json
-from typing import Annotated, Literal
+from typing import Annotated, Literal, get_args
 
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.dependencies import CurrentContext
 from fastmcp.server.lifespan import lifespan as server_lifespan
+from fastmcp.server.middleware import Middleware
 from fastmcp.tools import ToolResult
 from pydantic import Field
 
 from .config import Config
+from . import __version__
 from .query_service import FileOperation, Operation, QueryService, SymbolTarget, compact_payload
 
 Detail = Literal["compact", "standard", "full"]
@@ -19,9 +21,24 @@ BatchText = Annotated[list[QueryText], Field(min_length=1, max_length=16)]
 BatchNames = Annotated[list[Annotated[str, Field(min_length=1, max_length=200)]], Field(min_length=1, max_length=16)]
 Limit = Annotated[int, Field(ge=1, le=100)]
 READ_ONLY = {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}
-FIELDS = {"file", "line", "column", "name", "kind", "symbol_id", "container", "detail",
-          "signature", "source", "source_start_line", "source_truncated", "text_truncated",
-          "range", "severity", "message", "call_sites", "usr", "id", "containerName"}
+FieldName = Literal["file", "line", "column", "name", "kind", "symbol_id", "container", "detail",
+                    "signature", "source", "source_start_line", "source_truncated", "text_truncated",
+                    "range", "severity", "message", "call_sites", "usr", "id", "containerName",
+                    "call_site_file", "call_sites_truncated", "location_source", "index_location", "ambiguity"]
+FIELDS = frozenset(get_args(FieldName))
+Projection = Annotated[list[FieldName] | None, Field(min_length=1, max_length=len(FIELDS),
+    description="Project only these fields; location conflicts and truncation evidence are always preserved.")]
+
+
+class CodeModeResults(Middleware):
+    """Keep one model-facing representation; internal tools retain structured data."""
+
+    async def on_call_tool(self, context, call_next):
+        result = await call_next(context)
+        if context.message.name in ("search", "get_schema", "execute") and result.structured_content is not None:
+            return ToolResult(content=[], structured_content=result.structured_content,
+                              meta=result.meta, is_error=result.is_error)
+        return result
 
 def render_results(service, results, *, detail="compact", fields=None, max_items=80, max_chars=24000):
     if fields is not None and (not fields or set(fields) - FIELDS):
@@ -73,7 +90,7 @@ def create_server(config, *, service_factory=QueryService):
             await service.stop()
 
     mcp = FastMCP(
-        "cpp-analyzer", version="0.2.0", lifespan=lifespan,
+        "cpp-analyzer", version=__version__, lifespan=lifespan,
         instructions=(
             ("Use search/get_schema to discover tools, then execute sandboxed code with call_tool. "
              "Filter and combine queries in the sandbox; return only the needed data. "
@@ -82,34 +99,45 @@ def create_server(config, *, service_factory=QueryService):
             "Batch independent targets and operations. compact results use files + columns/rows; file indexes refer "
             "to files relative to root, positions are 1-based Unicode codepoints. Empty results are valid; index "
             "coverage is not guaranteed. Use cursors for more rows, fields to project, full only when needed. "
-            "Changed files invalidate symbol handles and result cursors."
+            "Changed files invalidate symbol handles and result cursors. "
+            "Inspect warnings on empty index-dependent results. A declaration location is not proof of an implementation. "
+            "Call-site AST evidence takes precedence over conflicting index locations; conflicts remain visible."
         ),
     )
 
     def service(ctx: Context):
         return ctx.lifespan_context["service"]
 
-    @mcp.tool(annotations=READ_ONLY)
+    def projected_tool(function):
+        # Code Mode's detailed formatter omits enum values inside arrays.
+        function.__doc__ += "\n\nAllowed fields: " + ", ".join(get_args(FieldName)) + "."
+        return mcp.tool(annotations=READ_ONLY)(function)
+
+    @projected_tool
     async def search_symbols(
         queries: BatchNames, ctx: Context = CurrentContext(), path_prefix: str | None = None,
         kinds: list[int] | None = None, limit: Limit = 20, detail: Detail = "compact",
-        fields: list[str] | None = None,
+        fields: Projection = None,
     ) -> ToolResult:
         """Batch name discovery. Optional path/kind filters; returns reusable symbol_id and result cursors."""
         backend = service(ctx)
         results = await backend.search(queries, path_prefix=path_prefix, kinds=kinds, limit=limit, detail=detail)
         return render_results(backend, results, detail=detail, fields=fields)
 
-    @mcp.tool(annotations=READ_ONLY)
+    @projected_tool
     async def query_symbols(
         targets: Annotated[list[SymbolTarget], Field(min_length=1, max_length=16)],
         operations: Annotated[list[Operation], Field(min_length=1, max_length=12)],
         ctx: Context = CurrentContext(), limit: Limit = 20, detail: Detail = "compact",
-        fields: list[str] | None = None,
+        fields: Projection = None,
         max_items: Annotated[int, Field(ge=1, le=500)] = 80,
         max_chars: Annotated[int, Field(ge=1000, le=100000)] = 24000,
     ) -> ToolResult:
-        """Batch targets x operations: definitions, references, context, callers/callees and type hierarchy."""
+        """Batch semantic queries. Index coverage and link-time target selection are not guaranteed.
+
+        definition may return a declaration when no implementation is indexed; inspect location_kind and warnings.
+        callees preserves call sites and conflicting index locations rather than silently selecting a linked target.
+        """
         if len(targets) * len(operations) > 64:
             raise ToolError("A batch supports at most 64 target/operation pairs")
         if len(set(operations)) != len(operations):
@@ -119,11 +147,11 @@ def create_server(config, *, service_factory=QueryService):
         return render_results(backend, results, detail=detail, fields=fields,
                               max_items=max_items, max_chars=max_chars)
 
-    @mcp.tool(annotations=READ_ONLY)
+    @projected_tool
     async def query_files(
         files: BatchText, operations: Annotated[list[FileOperation], Field(min_length=1, max_length=2)],
         ctx: Context = CurrentContext(), limit: Limit = 20, detail: Detail = "compact",
-        fields: list[str] | None = None,
+        fields: Projection = None,
     ) -> ToolResult:
         """Batch file outlines or current-version compiler diagnostics. Paths can be workspace-relative."""
         if len(set(operations)) != len(operations):
@@ -132,10 +160,10 @@ def create_server(config, *, service_factory=QueryService):
         return render_results(backend, await backend.files(files, operations, limit=limit, detail=detail),
                               detail=detail, fields=fields)
 
-    @mcp.tool(annotations=READ_ONLY)
+    @projected_tool
     async def read_results(
         cursors: BatchText, ctx: Context = CurrentContext(), limit: Limit = 20, detail: Detail = "compact",
-        fields: list[str] | None = None,
+        fields: Projection = None,
     ) -> ToolResult:
         """Batch page/expand cached results. Expired or changed-source cursors explicitly fail."""
         backend = service(ctx)
@@ -159,8 +187,5 @@ def create_server(config, *, service_factory=QueryService):
     elif config.tool_mode == "code":
         from fastmcp.experimental.transforms.code_mode import CodeMode
         mcp.add_transform(CodeMode(max_tool_calls=50, wall_clock_timeout_secs=120))
+        mcp.add_middleware(CodeModeResults())
     return mcp
-
-def create_mcp():
-    """Native FastMCP factory using the client's working directory and environment."""
-    return create_server(Config.from_environment())

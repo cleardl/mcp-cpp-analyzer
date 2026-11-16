@@ -4,6 +4,8 @@ import json
 import logging
 from pathlib import Path
 
+from . import __version__
+
 logger = logging.getLogger(__name__)
 
 class LspError(RuntimeError):
@@ -30,6 +32,8 @@ class ClangdClient:
         self.diagnostics = {}
         self.diagnostic_events = {}
         self.progress = {}
+        self.index_progress = None
+        self.index_runs_completed = 0
         self._writer_lock = asyncio.Lock()
         self._reader_task = None
         self._process_task = None
@@ -42,7 +46,7 @@ class ClangdClient:
         try:
             result = await self.request("initialize", {
                 "processId": None, "rootUri": path_to_uri(self.workspace_root),
-                "clientInfo": {"name": "mcp-cpp-analyzer", "version": "0.2.0"},
+                "clientInfo": {"name": "mcp-cpp-analyzer", "version": __version__},
                 "capabilities": {
                     "general": {"positionEncodings": ["utf-8", "utf-16"]},
                     "workspace": {"configuration": True, "workspaceFolders": True},
@@ -171,10 +175,16 @@ class ClangdClient:
             self.diagnostic_events.setdefault(params["uri"], asyncio.Event()).set()
         elif method == "$/progress":
             token = str(params["token"])
-            if params["value"].get("kind") == "end":
+            value = {**self.progress.get(token, {}), **params["value"]}
+            is_index = token == "backgroundIndexProgress" or value.get("title", "").casefold() == "indexing"
+            if is_index:
+                self.index_progress = {"token": token, **value}
+            if value.get("kind") == "end":
                 self.progress.pop(token, None)
+                if is_index:
+                    self.index_runs_completed += 1
             else:
-                self.progress[token] = params["value"]
+                self.progress[token] = value
         elif method == "window/logMessage":
             logger.log(logging.WARNING if params.get("type", 1) <= 2 else logging.DEBUG,
                        "clangd: %s", params.get("message", ""))
