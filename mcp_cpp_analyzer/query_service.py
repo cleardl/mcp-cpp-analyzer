@@ -258,6 +258,24 @@ class QueryService:
             rows.append(row)
         return rows
 
+    async def _search_rows(self, values, *, detail):
+        rows, offsets, skipped = [], [], {}
+        snapshots = {}
+        for index, value in enumerate(values):
+            path = self._location_identity(value)[0]
+            if path in skipped:
+                continue
+            try:
+                row = await self._location(value, detail=detail, snapshots=snapshots)
+            except LspError as error:
+                if error.code != "SOURCE_ENCODING_UNSUPPORTED":
+                    raise
+                skipped[path] = {"file": str(path), "code": error.code, "message": str(error)}
+                continue
+            rows.append(row)
+            offsets.append(index + 1)
+        return rows, offsets, list(skipped.values())
+
     async def _page(self, entry, *, offset=0, limit=20, detail="compact", key=None):
         snapshot = None
         if entry.get("source"):
@@ -266,7 +284,10 @@ class QueryService:
                 raise LspError("STALE_RESULT", "Source changed; repeat the semantic query")
         values = entry["values"]
         selected = values[offset:offset + limit]
-        if entry["op"] in ("hover", "context"):
+        skipped, row_offsets = [], None
+        if entry["op"] == "symbols" and not entry.get("source"):
+            rows, row_offsets, skipped = await self._search_rows(selected, detail=detail)
+        elif entry["op"] in ("hover", "context"):
             rows = await self._rows(entry["op"], selected[0], snapshot=snapshot,
                                     line=entry["line"], column=entry["column"], detail=detail) if selected else []
         elif entry["op"] == "symbol_info":
@@ -281,6 +302,11 @@ class QueryService:
                   "coverage": "document" if document_local else "index-dependent", "_key": key, "_offset": offset,
                   **entry.get("metadata", {})}
         warnings = list(result.get("warnings", []))
+        if row_offsets is not None:
+            result["_row_offsets"] = [offset + value for value in row_offsets]
+        if skipped:
+            result["skipped_files"] = skipped
+            warnings.append("SOURCE_FILES_SKIPPED")
         if not document_local and not values:
             warnings.append("INDEX_COVERAGE_UNVERIFIED")
         if any(row.get("ambiguity") for row in rows):
@@ -460,7 +486,8 @@ def compact_payload(results, root, *, detail="compact", fields=None):
                 item["items"] = normalized
         elif "error" not in item:
             item["items"] = []
-        converted.append(item)
-    return {"status": "error" if errors == len(results) else ("partial" if errors else "ok"),
+        converted.append(map_files(item))
+    partial = errors or any(result.get("skipped_files") for result in results)
+    return {"status": "error" if errors == len(results) else ("partial" if partial else "ok"),
             "root": str(root), "files": paths, "position_encoding": "unicode-codepoints",
             "results": converted}

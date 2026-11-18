@@ -64,7 +64,12 @@ class DocumentManager:
             after = path.stat()
             if (before.st_mtime_ns, before.st_size) != (after.st_mtime_ns, after.st_size):
                 raise LspError("DOCUMENT_CHANGED", f"File changed while reading: {path}")
-            return Snapshot(path, raw.decode("utf-8"), hashlib.sha256(raw).hexdigest())
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise LspError("SOURCE_ENCODING_UNSUPPORTED",
+                               f"Source file must be UTF-8: {path}; byte {error.start}: {error.reason}") from error
+            return Snapshot(path, text, hashlib.sha256(raw).hexdigest())
         return await asyncio.to_thread(read)
 
     @asynccontextmanager

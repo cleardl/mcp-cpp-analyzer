@@ -22,7 +22,7 @@ Windows 发布程序使用 stdio 轻量代理，默认启用 Code Mode。Python�
 }
 ~~~
 
-编译数据库目录须包含 compile_commands.json；相对路径以 cwd 为基准。源码和协议文本固定使用 UTF-8，解码失败直接报错。服务不检查更新，不需要额外后端配置文件或启动参数。
+编译数据库目录须包含 compile_commands.json；相对路径以 cwd 为基准。源码和协议文本固定使用 UTF-8；直接查询非 UTF-8 文件返回 SOURCE_ENCODING_UNSUPPORTED，跨文件符号搜索保留可用结果，并在 skipped_files 中报告跳过的文件。服务不检查更新，不需要额外后端配置文件或启动参数。
 
 启动超时建议 90 秒，工具超时建议 150 秒。首次连接通过 execute 调用 workspace_status 核对工作区、数据库、shared_backend.pid 与 clangd_pid。
 
@@ -65,8 +65,9 @@ return result
 - standard 返回具名对象，full 按需包含详细范围和源码。默认输出预算为 80 项、24000 字符。
 - truncated 时用 cursor 继续；result_id 可从头展开，二者传给 read_results 的 cursors。
 - 文件变化、句柄过期或进程重启后重新发现。部分失败逐项返回，全部失败使用 MCP isError=true。
+- search_symbols 跳过非 UTF-8 候选文件时返回 status="partial"、SOURCE_FILES_SKIPPED 和 skipped_files；文件仍由 clangd 管理，跳过的是本次结果转换，不表示已从 clangd 索引移除。fields 不隐藏这些信息，分页继续使用返回的 cursor。
 - 跨文件结果依赖 clangd 索引，空结果不能证明全仓不存在，诊断不等同工程编译。
-- index_activity 区分未观察到索引、索引中和空闲；空闲不代表全工程覆盖，index_complete 保持未知。空的索引查询返回 INDEX_COVERAGE_UNVERIFIED。
+- workspace_status 返回的 index_activity 字段区分未观察到索引、索引中和空闲；空闲不代表全工程覆盖，index_complete 保持未知。空的索引查询返回 INDEX_COVERAGE_UNVERIFIED。
 - definition 的 location_kind 区分 AST 定义、声明和索引位置；仅有声明时返回 IMPLEMENTATION_UNCONFIRMED。
 - 在定义处查询时，clangd 可能回跳声明；同一 AST 已知定义时归一到定义位置，并标记 declaration_navigation=true。
 - 调用结果保留调用点。能够用调用点 AST 确认定义时优先使用该位置；与索引冲突时同时保留 index_location 和警告，fields 也不能隐藏冲突证据。linkage_verified=false 表示未验证最终链接选择。

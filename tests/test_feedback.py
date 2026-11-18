@@ -9,13 +9,14 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import AsyncMock
 
 from fastmcp import Client
 from fastmcp.client.transports import StdioTransport
 from mcp_cpp_analyzer.clangd_client import ClangdClient
 from mcp_cpp_analyzer.config import Config
 from mcp_cpp_analyzer.query_service import BoundedStore, QueryService, SymbolTarget, compact_payload
-from mcp_cpp_analyzer.server import FIELDS, create_server
+from mcp_cpp_analyzer.server import FIELDS, create_server, render_results
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -80,6 +81,73 @@ class FeedbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["index_activity"]["state"], "idle")
         self.assertEqual(state["index_activity"]["completed_runs"], 1)
         self.assertIsNone(state["index_complete"])
+
+    def mixed_encoding_search(self):
+        good = self.root / "utf8.cpp"
+        prefix = "/* 中😀 */ int "
+        good.write_text(prefix + "MixedGood;\nint MixedOther;\n", encoding="utf-8")
+        bad = self.root / "legacy.cpp"
+        bad.write_bytes("/* 中文 */ int MixedBad;\n".encode("gbk"))
+        def symbol(path, name, line=0, column=0):
+            return {"name": name, "kind": 13, "location": {"uri": path.as_uri(), "range": {
+                "start": {"line": line, "character": column},
+                "end": {"line": line, "character": column + len(name)}}}}
+        values = [symbol(bad, "MixedBad"), symbol(bad, "MixedBadAgain"),
+                  symbol(good, "MixedGood", column=len(prefix.encode("utf-16-le")) // 2),
+                  symbol(good, "MixedOther", line=1, column=4)]
+        service = QueryService(self.config)
+        service.methods.search_symbols = AsyncMock(return_value=values)
+        return service, values, good, bad, len(prefix) + 1
+
+    async def test_non_utf8_search_keeps_valid_symbols_warnings_and_raw_cursor_offsets(self):
+        service, _, good, bad, column = self.mixed_encoding_search()
+        results = await service.search(["Mixed"], limit=3)
+        page = results[0]
+        self.assertNotIn("error", page)
+        self.assertEqual([row["name"] for row in page["items"]], ["MixedGood"])
+        self.assertEqual((page["items"][0]["file"], page["items"][0]["column"]), (str(good), column))
+        self.assertEqual(page["backend_returned"], 4)
+        self.assertTrue(page["truncated"])
+        self.assertEqual(len(page["skipped_files"]), 1)
+        failure = page["skipped_files"][0]
+        self.assertEqual(failure["file"], str(bad))
+        self.assertEqual(failure["code"], "SOURCE_ENCODING_UNSUPPORTED")
+        self.assertIn("byte", failure["message"])
+        payload = compact_payload(results, self.root, fields=["name"])
+        self.assertEqual(payload["status"], "partial")
+        self.assertIn("SOURCE_FILES_SKIPPED", payload["results"][0]["warnings"])
+        mapped = payload["results"][0]["skipped_files"][0]["file"]
+        self.assertEqual(self.root / payload["files"][mapped], bad)
+        following = (await service.read_page(page["cursor"]))[0]
+        self.assertEqual([row["name"] for row in following["items"]], ["MixedOther"])
+        self.assertFalse(following["truncated"])
+
+    async def test_search_output_budget_does_not_repeat_rows_after_skipping_a_file(self):
+        service, _, _, _, _ = self.mixed_encoding_search()
+        results = await service.search(["Mixed"], limit=4)
+        response = render_results(service, results, fields=["name"], max_items=1).structured_content
+        page = response["results"][0]
+        self.assertEqual(response["status"], "partial")
+        self.assertEqual(page["rows"], [["MixedGood"]])
+        self.assertTrue(page["truncated"])
+        self.assertTrue(page["cursor"].endswith("/3"))
+        following = (await service.read_page(page["cursor"]))[0]
+        self.assertEqual([row["name"] for row in following["items"]], ["MixedOther"])
+
+    async def test_all_non_utf8_search_results_are_partial_and_other_file_errors_are_not_hidden(self):
+        service, values, _, bad, _ = self.mixed_encoding_search()
+        service.methods.search_symbols.return_value = values[:2]
+        results = await service.search(["MixedBad"])
+        payload = compact_payload(results, self.root)
+        self.assertEqual(payload["status"], "partial")
+        self.assertEqual(payload["results"][0]["items"], [])
+        self.assertFalse(payload["results"][0]["truncated"])
+        explicit = await service.files([str(bad)], ["symbols"])
+        self.assertEqual(explicit[0]["error"]["code"], "SOURCE_ENCODING_UNSUPPORTED")
+        self.assertIn(str(bad), explicit[0]["error"]["message"])
+        bad.unlink()
+        missing = await service.search(["MixedBad"])
+        self.assertEqual(missing[0]["error"]["code"], "FileNotFoundError")
 
     async def test_code_mode_schema_and_results_have_one_model_facing_representation(self):
         class StatusOnly:

@@ -44,6 +44,12 @@ def render_results(service, results, *, detail="compact", fields=None, max_items
     if fields is not None and (not fields or set(fields) - FIELDS):
         raise ToolError(f"fields must be selected from: {', '.join(sorted(FIELDS))}")
     results = [dict(result, items=list(result.get("items", []))) for result in results]
+    def cursor_after_rows(result):
+        count = len(result["items"])
+        offsets = result.get("_row_offsets")
+        offset = offsets[count - 1] if offsets is not None and count else result["_offset"] + count
+        return f"{result['_key']}/{offset}"
+
     remaining = max_items
     for result in results:
         rows = result["items"]
@@ -51,7 +57,7 @@ def render_results(service, results, *, detail="compact", fields=None, max_items
             result["items"] = rows[:remaining]
             result["returned"] = remaining
             result["truncated"] = True
-            result["cursor"] = f"{result['_key']}/{result['_offset'] + remaining}"
+            result["cursor"] = cursor_after_rows(result)
         remaining -= len(result["items"])
 
     def serialize():
@@ -67,7 +73,7 @@ def render_results(service, results, *, detail="compact", fields=None, max_items
         candidate["items"].pop()
         candidate["returned"] = len(candidate["items"])
         candidate["truncated"] = True
-        candidate["cursor"] = f"{candidate['_key']}/{candidate['_offset'] + candidate['returned']}"
+        candidate["cursor"] = cursor_after_rows(candidate)
         text = serialize()
     if results and all("error" in result for result in results):
         raise ToolError(text)
@@ -119,7 +125,10 @@ def create_server(config, *, service_factory=QueryService):
         kinds: list[int] | None = None, limit: Limit = 20, detail: Detail = "compact",
         fields: Projection = None,
     ) -> ToolResult:
-        """Batch name discovery. Optional path/kind filters; returns reusable symbol_id and result cursors."""
+        """Batch name discovery with optional path/kind filters, symbol_id and result cursors.
+
+        Non-UTF-8 candidate files are skipped with partial results, warnings and skipped_files.
+        """
         backend = service(ctx)
         results = await backend.search(queries, path_prefix=path_prefix, kinds=kinds, limit=limit, detail=detail)
         return render_results(backend, results, detail=detail, fields=fields)
