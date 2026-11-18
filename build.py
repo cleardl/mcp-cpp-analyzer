@@ -18,6 +18,24 @@ def git(*arguments):
     return subprocess.check_output(["git", "-C", str(ROOT), *arguments], encoding="utf-8").strip()
 
 
+def prepare_worker(source, output):
+    """Package the Windows pipe worker without allocating a console window."""
+    if sys.platform != "win32":
+        return source
+    import pefile
+
+    destination = output / "worker" / source.name
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with pefile.PE(str(source), fast_load=True) as image:
+        if image.OPTIONAL_HEADER.Subsystem not in (2, 3):
+            raise ValueError(f"Expected a Windows GUI or console worker: {source}")
+        image.OPTIONAL_HEADER.Subsystem = 2  # IMAGE_SUBSYSTEM_WINDOWS_GUI
+        image.OPTIONAL_HEADER.CheckSum = image.generate_checksum()
+        data = image.write()
+    destination.write_bytes(data)
+    return destination
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=ROOT / "dist")
@@ -30,6 +48,7 @@ def main():
     worker = Path(sysconfig.get_path("scripts")) / ("monty" + suffix)
     if not worker.is_file():
         raise FileNotFoundError(f"Code Mode worker is missing: {worker}")
+    worker = prepare_worker(worker, output)
     metadata = {"version": __version__, "revision": git("rev-parse", "HEAD"), "dirty": False}
     metadata_path = output / "_build_info.json"
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")

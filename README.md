@@ -89,7 +89,9 @@ uv sync --locked --group build
 
 代理在导入运行逻辑前保留独立协议管道，将 Python print 与原生 stdout 日志导向 stderr；不导入 FastMCP、Pydantic 或沙箱。后台通过独立连接收发协议，日志写入运行目录，Monty worker 随后台封装。发布前验证多会话复用、工作区隔离、首个客户端退出、后台异常恢复、空闲清理及真实语义查询。
 
-回归检查使用 stdlib unittest，只启动 clangd 解析测试文件，不调用 C/C++ 编译器。设置 CPP_ANALYZER_TEST_CLANGD 指向 clangd 后运行：
+Windows 打包时，将 Monty worker 的副本设为 GUI 子系统并更新 PE 校验和，避免每次 Code Mode 执行时弹出控制台窗口；worker 继续使用父进程提供的协议管道。环境中安装的原始 Monty 文件保持原样，其他平台不做此处理。
+
+回归检查使用 stdlib unittest，Windows 打包用例需要 build 依赖组；只启动 clangd 解析测试文件，不调用 C/C++ 编译器。设置 CPP_ANALYZER_TEST_CLANGD 指向 clangd 后运行：
 
 ~~~powershell
 .venv/Scripts/python.exe -X utf8 -B -m unittest discover -s tests -v

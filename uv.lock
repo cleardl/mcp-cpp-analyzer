@@ -704,7 +704,7 @@ wheels = [
 
 [[package]]
 name = "mcp-cpp-analyzer"
-version = "0.3.1"
+version = "0.3.2"
 source = { virtual = "." }
 dependencies = [
     { name = "fastmcp", extra = ["code-mode"] },
@@ -719,6 +719,7 @@ benchmark = [
 
 [package.dev-dependencies]
 build = [
+    { name = "pefile", marker = "sys_platform == 'win32'" },
     { name = "pyinstaller" },
 ]
 
@@ -732,7 +733,10 @@ requires-dist = [
 provides-extras = ["benchmark"]
 
 [package.metadata.requires-dev]
-build = [{ name = "pyinstaller", specifier = "==6.22.3" }]
+build = [
+    { name = "pefile", marker = "sys_platform == 'win32'", specifier = ">=2024.8.26" },
+    { name = "pyinstaller", specifier = "==6.22.3" },
+]
 
 [[package]]
 name = "mcp-types"

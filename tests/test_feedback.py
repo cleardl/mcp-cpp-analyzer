@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import unittest
 from unittest.mock import AsyncMock
@@ -64,6 +65,26 @@ class FeedbackTests(unittest.IsolatedAsyncioTestCase):
                 "files": ["sample.cpp"], "operations": ["symbols"], "fields": ["not_a_field"]})
             self.assertTrue(response.is_error)
         self.assertEqual(instance.calls, 0)
+
+    @unittest.skipUnless(os.name == "nt", "Windowed worker packaging targets Windows")
+    async def test_windowed_worker_preserves_pipe_results_errors_and_original_binary(self):
+        import hashlib
+        import pefile
+        from build import prepare_worker
+        from pydantic_monty import AsyncMonty, MontyRuntimeError
+
+        original = Path(sysconfig.get_path("scripts")) / "monty.exe"
+        digest = hashlib.sha256(original.read_bytes()).hexdigest()
+        worker = prepare_worker(original, self.root)
+        with pefile.PE(str(worker), fast_load=True) as image:
+            self.assertEqual(image.OPTIONAL_HEADER.Subsystem, 2)
+            self.assertEqual(image.OPTIONAL_HEADER.CheckSum, image.generate_checksum())
+        async with AsyncMonty(binary_path=worker, min_processes=1, max_processes=1) as pool:
+            async with pool.checkout() as session:
+                self.assertEqual(await session.feed_run("40 + 2"), 42)
+                with self.assertRaisesRegex(MontyRuntimeError, "worker-error"):
+                    await session.feed_run('raise ValueError("worker-error")')
+        self.assertEqual(hashlib.sha256(original.read_bytes()).hexdigest(), digest)
 
     async def test_index_progress_is_observable_but_does_not_claim_complete_coverage(self):
         service = QueryService(replace(self.config, background_index=True))
