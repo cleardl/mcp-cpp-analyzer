@@ -43,19 +43,19 @@ def identity(value):
 
 def new_profile(*, workspace=None, compile_db=None, clangd=None, backend_command=None, backend_arguments=None):
     root = Path(workspace or Path.cwd()).resolve()
-    database = compile_db if compile_db is not None else os.environ.get("CPP_ANALYZER_COMPILE_DB_PATH")
+    database = compile_db if compile_db is not None else os.environ.get("CPP_SEMANTIC_SEARCH_COMPILE_DB_PATH")
     if not database or not str(database).strip():
-        raise ValueError("Required environment variable CPP_ANALYZER_COMPILE_DB_PATH is missing")
+        raise ValueError("Required environment variable CPP_SEMANTIC_SEARCH_COMPILE_DB_PATH is missing")
     database = (root / database).resolve()
     if not root.is_dir() or not (database / "compile_commands.json").is_file():
         raise ValueError(f"Invalid workspace or missing compilation database: {root}; {database}")
-    mode = os.environ.get("CPP_ANALYZER_TOOL_MODE", "code")
+    mode = os.environ.get("CPP_SEMANTIC_SEARCH_TOOL_MODE", "code")
     if mode not in ("code", "direct", "search"):
         raise ValueError(f"Unknown tool mode: {mode}")
     if backend_command is None:
         if not getattr(sys, "frozen", False):
             raise ValueError("Source execution requires an explicit backend command and clangd path")
-        backend_command = Path(sys.executable).with_name("mcp-cpp-analyzer-backend.exe")
+        backend_command = Path(sys.executable).with_name("mcp-cpp-semantic-search-backend.exe")
         backend_arguments = []
     command = Path(backend_command).resolve()
     clangd = Path(clangd).resolve() if clangd else command.with_name("clangd.exe")
@@ -66,9 +66,9 @@ def new_profile(*, workspace=None, compile_db=None, clangd=None, backend_command
              "backend_command": str(command), "backend_arguments": [str(item) for item in backend_arguments or []],
              "clangd": str(clangd), "idle_seconds": IDLE_SECONDS}
     value["key"] = identity(value)
-    value["task_name"] = "McpCppAnalyzer-" + value["key"]
-    value["mutex"] = "Local\\McpCppAnalyzer-" + value["key"]
-    directory = private_directory(Path(os.environ["LOCALAPPDATA"]) / "mcp-cpp-analyzer" / value["key"])
+    value["task_name"] = "McpCppSemanticSearch-" + value["key"]
+    value["mutex"] = "Local\\McpCppSemanticSearch-" + value["key"]
+    directory = private_directory(Path(os.environ["LOCALAPPDATA"]) / "mcp-cpp-semantic-search" / value["key"])
     value["profile_path"] = str(directory / "profile.json")
     return value
 
@@ -81,7 +81,7 @@ def load_profile(path):
         raise ValueError("Workspace profile belongs to a different program build")
     if Path(value["profile_path"]).resolve() != Path(path).resolve():
         raise ValueError("Workspace profile path does not match its contents")
-    if value["task_name"] != "McpCppAnalyzer-" + value["key"] or value["mutex"] != "Local\\McpCppAnalyzer-" + value["key"]:
+    if value["task_name"] != "McpCppSemanticSearch-" + value["key"] or value["mutex"] != "Local\\McpCppSemanticSearch-" + value["key"]:
         raise ValueError("Workspace profile has invalid ownership identifiers")
     return value
 

@@ -196,13 +196,13 @@ def task_command(*arguments):
 
 
 def launch_task(name, definition):
-    if not name.startswith("McpCppAnalyzer-") or "\\" in name:
+    if not name.startswith("McpCppSemanticSearch-") or "\\" in name:
         raise ValueError("Invalid shared-backend task name")
     task_command("/Create", "/TN", name, "/XML", str(definition), "/F")
     task_command("/Run", "/TN", name)
 
 
 def delete_task(name):
-    if not name.startswith("McpCppAnalyzer-") or "\\" in name:
+    if not name.startswith("McpCppSemanticSearch-") or "\\" in name:
         raise ValueError("Invalid shared-backend task name")
     task_command("/Delete", "/TN", name, "/F")

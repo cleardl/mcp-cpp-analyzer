@@ -14,26 +14,26 @@ from unittest.mock import AsyncMock
 
 from fastmcp import Client
 from fastmcp.client.transports import StdioTransport
-from mcp_cpp_analyzer.clangd_client import ClangdClient
-from mcp_cpp_analyzer.config import Config
-from mcp_cpp_analyzer.query_service import BoundedStore, QueryService, SymbolTarget, compact_payload
-from mcp_cpp_analyzer.server import FIELDS, create_server, render_results
+from mcp_cpp_semantic_search.clangd_client import ClangdClient
+from mcp_cpp_semantic_search.config import Config
+from mcp_cpp_semantic_search.query_service import BoundedStore, QueryService, SymbolTarget, compact_payload
+from mcp_cpp_semantic_search.server import FIELDS, create_server, render_results
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class FeedbackTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        directory = Path(os.environ.get("CPP_ANALYZER_TEST_WORK_DIR", ROOT / "resource/test-work")).resolve()
+        directory = Path(os.environ.get("CPP_SEMANTIC_SEARCH_TEST_WORK_DIR", ROOT / "resource/test-work")).resolve()
         directory.mkdir(parents=True, exist_ok=True)
         self.temporary = tempfile.TemporaryDirectory(prefix="feedback-", dir=directory)
         self.root = Path(self.temporary.name).resolve()
         if self.root.parent != directory:
             raise RuntimeError("Test directory escaped the resource workspace")
         self.addCleanup(self.temporary.cleanup)
-        backend = os.environ.get("CPP_ANALYZER_TEST_CLANGD") or shutil.which("clangd")
+        backend = os.environ.get("CPP_SEMANTIC_SEARCH_TEST_CLANGD") or shutil.which("clangd")
         if backend is None:
-            self.skipTest("Set CPP_ANALYZER_TEST_CLANGD to a clangd executable")
+            self.skipTest("Set CPP_SEMANTIC_SEARCH_TEST_CLANGD to a clangd executable")
         (self.root / "compile_commands.json").write_text("[]", encoding="utf-8")
         self.config = Config(compile_db_dir=self.root, workspace_root=self.root,
                              clangd_path=backend, background_index=False)
@@ -279,7 +279,7 @@ class FeedbackTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_native_fd_and_windows_handle_logs_do_not_enter_protocol_stdout(self):
         script = '''import ctypes, json, os
-from mcp_cpp_analyzer.stdio import reserve_protocol_stdout
+from mcp_cpp_semantic_search.stdio import reserve_protocol_stdout
 protocol = reserve_protocol_stdout()
 print("python-print-log", flush=True)
 os.write(1, b"native-fd-log\\n")
@@ -305,9 +305,9 @@ protocol.flush()
             self.assertIn("native-handle-log", result.stderr)
 
     async def test_explicit_stdio_stream_preserves_lifespan_and_isolates_python_prints(self):
-        script = '''from mcp_cpp_analyzer.stdio import reserve_protocol_stdout
+        script = '''from mcp_cpp_semantic_search.stdio import reserve_protocol_stdout
 protocol = reserve_protocol_stdout()
-from mcp_cpp_analyzer.transport import serve_stdio
+from mcp_cpp_semantic_search.transport import serve_stdio
 import anyio
 from fastmcp import FastMCP
 from fastmcp.server.lifespan import lifespan

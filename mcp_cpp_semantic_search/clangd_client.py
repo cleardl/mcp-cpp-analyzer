@@ -46,7 +46,7 @@ class ClangdClient:
         try:
             result = await self.request("initialize", {
                 "processId": None, "rootUri": path_to_uri(self.workspace_root),
-                "clientInfo": {"name": "mcp-cpp-analyzer", "version": __version__},
+                "clientInfo": {"name": "mcp-cpp-semantic-search", "version": __version__},
                 "capabilities": {
                     "general": {"positionEncodings": ["utf-8", "utf-16"]},
                     "workspace": {"configuration": True, "workspaceFolders": True},

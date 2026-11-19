@@ -15,9 +15,9 @@ from unittest.mock import patch
 from fastmcp import Client
 from fastmcp.client.transports import StdioTransport
 
-from mcp_cpp_analyzer.shared_protocol import connect
-from mcp_cpp_analyzer.shared_runtime import atomic_json, new_profile, read_json
-from mcp_cpp_analyzer.windows_runtime import process_alive
+from mcp_cpp_semantic_search.shared_protocol import connect
+from mcp_cpp_semantic_search.shared_runtime import atomic_json, new_profile, read_json
+from mcp_cpp_semantic_search.windows_runtime import process_alive
 
 ROOT = Path(__file__).resolve().parents[1]
 STATUS_CODE = '''s = await call_tool("workspace_status", {})
@@ -28,17 +28,17 @@ return {"ready": s["ready"], "workspace": s["workspace"], "compile_db": s["compi
 @unittest.skipUnless(os.name == "nt", "Shared process launch currently targets Windows")
 class SharedRuntimeTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        work = Path(os.environ.get("CPP_ANALYZER_TEST_WORK_DIR", ROOT / "resource/test-work")).resolve()
+        work = Path(os.environ.get("CPP_SEMANTIC_SEARCH_TEST_WORK_DIR", ROOT / "resource/test-work")).resolve()
         work.mkdir(parents=True, exist_ok=True)
         self.temporary = tempfile.TemporaryDirectory(prefix="shared-", dir=work)
         self.folder = Path(self.temporary.name).resolve()
         self.assertEqual(self.folder.parent, work)
         self.addCleanup(self.temporary.cleanup)
         self.host = self.folder / "runtime"
-        self.proxy = os.environ.get("CPP_ANALYZER_TEST_PROXY")
-        self.clangd = os.environ.get("CPP_ANALYZER_TEST_CLANGD")
+        self.proxy = os.environ.get("CPP_SEMANTIC_SEARCH_TEST_PROXY")
+        self.clangd = os.environ.get("CPP_SEMANTIC_SEARCH_TEST_CLANGD")
         if not self.clangd:
-            self.skipTest("Set CPP_ANALYZER_TEST_CLANGD to a clangd executable")
+            self.skipTest("Set CPP_SEMANTIC_SEARCH_TEST_CLANGD to a clangd executable")
         self.profiles = {}
         self.workspaces = []
         for name, leaf in (("中文 # project", "leaf"), ("other", "other_leaf")):
@@ -64,7 +64,7 @@ class SharedRuntimeTests(unittest.IsolatedAsyncioTestCase):
             ["-X", "utf8", "-B", str(ROOT / "proxy.py"), "--profile", self.profiles[workspace]["profile_path"]]))
         transport = StdioTransport(command=command, args=args, cwd=str(workspace), keep_alive=False,
             env={"TMP": os.environ["TMP"], "LOCALAPPDATA": str(self.host),
-                 "CPP_ANALYZER_COMPILE_DB_PATH": str(workspace)}, log_file=self.folder / (name + ".log"))
+                 "CPP_SEMANTIC_SEARCH_COMPILE_DB_PATH": str(workspace)}, log_file=self.folder / (name + ".log"))
         return Client(transport, init_timeout=90, timeout=60, mode=mode)
 
     async def status(self, client):
@@ -88,6 +88,12 @@ class SharedRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 for name, mode in (("first", "auto"), ("second", "legacy"), ("third", "2026-07-28"))))
             states = await asyncio.gather(*(self.status(client) for client in (first, second, third)))
             original = states[0]
+            self.assertEqual(second.initialize_result.server_info.name, "cpp-semantic-search")
+            runtime_directory = Path(original["shared"]["runtime_directory"])
+            self.assertEqual(runtime_directory.parent.name, "mcp-cpp-semantic-search")
+            profile = read_json(runtime_directory / "profile.json")
+            self.assertEqual(profile["task_name"], "McpCppSemanticSearch-" + profile["key"])
+            self.assertEqual(profile["mutex"], "Local\\McpCppSemanticSearch-" + profile["key"])
             self.assertEqual({state["shared"]["pid"] for state in states}, {original["shared"]["pid"]})
             self.assertEqual({state["clangd_pid"] for state in states}, {original["clangd_pid"]})
             self.assertTrue(all(Path(state["workspace"]) == workspace for state in states))
@@ -148,7 +154,7 @@ return {"symbol_id": [item["symbol_id"] for item in r["results"][0]["items"] if 
     async def asyncTearDown(self):
         # Keep failing tests scoped to their own private runtime. Let normal idle
         # cleanup finish before TemporaryDirectory removes Windows-open log files.
-        home = self.host / "mcp-cpp-analyzer"
+        home = self.host / "mcp-cpp-semantic-search"
         failed = any(test is self for test, _ in self._outcome.result.errors + self._outcome.result.failures)
         if failed:
             for file in self.folder.glob("*.log"):

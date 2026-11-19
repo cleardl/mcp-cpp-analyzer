@@ -31,8 +31,8 @@ def main():
     logging.basicConfig(level=logging.WARNING,
         handlers=[RotatingFileHandler(directory / "analysis.log", maxBytes=1024 * 1024,
                                       backupCount=2, encoding="utf-8")])
-    from mcp_cpp_analyzer.shared_runtime import atomic_json, load_profile
-    from mcp_cpp_analyzer.windows_runtime import process_created
+    from mcp_cpp_semantic_search.shared_runtime import atomic_json, load_profile
+    from mcp_cpp_semantic_search.windows_runtime import process_created
     profile = None
     job = None
     clean = False
@@ -41,7 +41,7 @@ def main():
         profile = load_profile(arguments.profile)
         atomic_json(directory / "starting.json", {"pid": os.getpid(), "created": process_created(),
                                                   "launch_id": profile["launch_id"]})
-        from mcp_cpp_analyzer.windows_job import ProcessTree
+        from mcp_cpp_semantic_search.windows_job import ProcessTree
         job = ProcessTree()
         if getattr(sys, "frozen", False):
             sandbox = Path(__file__).resolve().with_name("monty.exe")
@@ -49,7 +49,7 @@ def main():
                 raise FileNotFoundError(f"Bundled Code Mode runtime is missing: {sandbox}")
             os.environ["MONTY_BIN"] = str(sandbox)
         import asyncio
-        from mcp_cpp_analyzer.shared_backend import SharedBackend
+        from mcp_cpp_semantic_search.shared_backend import SharedBackend
         asyncio.run(SharedBackend(profile).run())
         clean = True
         exit_code = 0

@@ -1,21 +1,21 @@
-# MCP C++ Analyzer
+# MCP C++ Semantic Search
 
-面向 AI Agent 的 C/C++ 语义查询服务。通过 clangd 和 compile_commands.json，提供批量符号搜索、定义与引用、调用关系、类型层级和当前文档诊断。
+面向 AI Agent 的 C/C++ 语义搜索服务。通过 clangd 和 compile_commands.json，提供批量符号搜索、定义与引用、调用关系、类型层级和当前文档诊断。
 
 ## 二进制部署
 
 Windows 发布程序使用 stdio 轻量代理，默认启用 Code Mode。Python、FastMCP 和 Code Mode 运行依赖已随包提供，使用端无需安装 Python 或保留源码。
 
-发布目录的 bin 中包含 mcp-cpp-analyzer-proxy.exe、mcp-cpp-analyzer-backend.exe、_proxy 运行库和 clangd.exe；保留与 bin 相邻的 lib/clang 资源目录。客户端配置示例：
+发布目录的 bin 中包含 mcp-cpp-semantic-search-proxy.exe、mcp-cpp-semantic-search-backend.exe、_proxy 运行库和 clangd.exe；保留与 bin 相邻的 lib/clang 资源目录。客户端配置示例：
 
 ~~~json
 {
   "mcpServers": {
-    "cpp-analyzer": {
-      "command": "C:/tools/cpp-analyzer/bin/mcp-cpp-analyzer-proxy.exe",
+    "cpp-semantic-search": {
+      "command": "C:/tools/cpp-semantic-search/bin/mcp-cpp-semantic-search-proxy.exe",
       "cwd": "C:/work/cpp-project",
       "env": {
-        "CPP_ANALYZER_COMPILE_DB_PATH": "C:/work/build"
+        "CPP_SEMANTIC_SEARCH_COMPILE_DB_PATH": "C:/work/build"
       }
     }
   }
@@ -33,7 +33,7 @@ Windows 发布程序使用 stdio 轻量代理，默认启用 Code Mode。Python�
 - 关闭一个客户端只断开它的连接。最后一个代理断开 30 秒后，后台关闭 clangd、删除按需任务并退出；期间重新接入会复用已有后台。
 - 后台异常退出时，Windows Job Object 清理其子进程；现有代理重连并恢复协议会话，无需重启 Agent。进行中的查询返回 BACKEND_RESTARTED，不重放；旧句柄需重新发现。
 
-后台仅监听本机回环地址，代理和后台双向认证。运行状态位于当前用户 LocalAppData 下的 mcp-cpp-analyzer，目录仅当前用户与 SYSTEM 可访问；端点和任务元数据由程序生成，无需另写配置。workspace_status.shared_backend.runtime_directory 可用于定位日志。
+后台仅监听本机回环地址，代理和后台双向认证。运行状态位于当前用户 LocalAppData 下的 mcp-cpp-semantic-search，目录仅当前用户与 SYSTEM 可访问；端点和任务元数据由程序生成，无需另写配置。workspace_status.shared_backend.runtime_directory 可用于定位日志。
 
 ## 查询接口
 
@@ -72,7 +72,7 @@ return result
 - 在定义处查询时，clangd 可能回跳声明；同一 AST 已知定义时归一到定义位置，并标记 declaration_navigation=true。
 - 调用结果保留调用点。能够用调用点 AST 确认定义时优先使用该位置；与索引冲突时同时保留 index_location 和警告，fields 也不能隐藏冲突证据。linkage_verified=false 表示未验证最终链接选择。
 
-Code Mode 每次最多 50 次内部工具调用、120 秒。CPP_ANALYZER_TOOL_MODE 默认为 code；direct 或 search 需显式设置。
+Code Mode 每次最多 50 次内部工具调用、120 秒。CPP_SEMANTIC_SEARCH_TOOL_MODE 默认为 code；direct 或 search 需显式设置。
 
 Code Mode 对对象结果只保留一份 structuredContent，不附加相同 JSON 的文本副本；非结构化结果与工具错误保留 content。fields 的允许值同时提供在完整 JSON schema 和简略参数说明中。
 
@@ -91,7 +91,7 @@ uv sync --locked --group build
 
 Windows 打包时，将 Monty worker 的副本设为 GUI 子系统并更新 PE 校验和，避免每次 Code Mode 执行时弹出控制台窗口；worker 继续使用父进程提供的协议管道。环境中安装的原始 Monty 文件保持原样，其他平台不做此处理。
 
-回归检查使用 stdlib unittest，Windows 打包用例需要 build 依赖组；只启动 clangd 解析测试文件，不调用 C/C++ 编译器。设置 CPP_ANALYZER_TEST_CLANGD 指向 clangd 后运行：
+回归检查使用 stdlib unittest，Windows 打包用例需要 build 依赖组；只启动 clangd 解析测试文件，不调用 C/C++ 编译器。设置 CPP_SEMANTIC_SEARCH_TEST_CLANGD 指向 clangd 后运行：
 
 ~~~powershell
 .venv/Scripts/python.exe -X utf8 -B -m unittest discover -s tests -v

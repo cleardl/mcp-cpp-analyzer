@@ -83,7 +83,7 @@ class SharedBackend:
                 self.tasks.discard(task)
 
     async def run(self):
-        with workspace_lock("Local\\McpCppAnalyzerOwner-" + self.profile["key"], timeout=0), ExitStack() as shutdown:
+        with workspace_lock("Local\\McpCppSemanticSearchOwner-" + self.profile["key"], timeout=0), ExitStack() as shutdown:
             async with self.mcp._lifespan_manager():
                 self.listener = await asyncio.start_server(self.client, "127.0.0.1", 0, limit=MAX_FRAME)
                 endpoint = {"key": self.profile["key"], "launch_id": self.profile["launch_id"],

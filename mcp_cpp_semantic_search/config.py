@@ -41,9 +41,9 @@ class Config:
     @classmethod
     def from_environment(cls, *, clangd_path):
         """Read the workspace database; the executable supplies its bundled backend."""
-        name = "CPP_ANALYZER_COMPILE_DB_PATH"
+        name = "CPP_SEMANTIC_SEARCH_COMPILE_DB_PATH"
         value = os.environ.get(name)
         if not value or not value.strip():
             raise ValueError(f"Required environment variable {name} is missing")
         return cls(workspace_root=Path.cwd(), compile_db_dir=value, clangd_path=str(clangd_path),
-                   tool_mode=os.environ.get("CPP_ANALYZER_TOOL_MODE", "code"))
+                   tool_mode=os.environ.get("CPP_SEMANTIC_SEARCH_TOOL_MODE", "code"))

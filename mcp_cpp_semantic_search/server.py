@@ -96,7 +96,7 @@ def create_server(config, *, service_factory=QueryService):
             await service.stop()
 
     mcp = FastMCP(
-        "cpp-analyzer", version=__version__, lifespan=lifespan,
+        "cpp-semantic-search", version=__version__, lifespan=lifespan,
         instructions=(
             ("Use search/get_schema to discover tools, then execute sandboxed code with call_tool. "
              "Filter and combine queries in the sandbox; return only the needed data. "
